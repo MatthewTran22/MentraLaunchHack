@@ -12,7 +12,7 @@ class FingerGunDetector:
         self.mp_hands = mp.solutions.hands
         self.hands = self.mp_hands.Hands(
             static_image_mode=False,
-            max_num_hands=2,
+            max_num_hands=4,  # Detect multiple to find the closest one
             min_detection_confidence=0.7,
             min_tracking_confidence=0.7
         )
@@ -246,6 +246,28 @@ class FingerGunDetector:
 
         return (x_min, y_min, x_max, y_max)
 
+    def get_hand_size(self, hand_landmarks, frame_shape):
+        """Get the size of the hand (area of bounding box) - larger = closer"""
+        bbox = self.get_hand_bbox(hand_landmarks, frame_shape)
+        x_min, y_min, x_max, y_max = bbox
+        return (x_max - x_min) * (y_max - y_min)
+
+    def get_closest_hand(self, hand_landmarks_list, frame_shape):
+        """Return the closest hand (largest on screen)"""
+        if not hand_landmarks_list:
+            return None, -1
+
+        max_size = 0
+        closest_idx = 0
+
+        for idx, hand_landmarks in enumerate(hand_landmarks_list):
+            size = self.get_hand_size(hand_landmarks, frame_shape)
+            if size > max_size:
+                max_size = size
+                closest_idx = idx
+
+        return hand_landmarks_list[closest_idx], closest_idx
+
     def save_shot(self, frame, hand_bbox=None):
         """Save the current frame when a shot is fired"""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
@@ -363,62 +385,69 @@ class FingerGunDetector:
         finger_gun_detected = False
         shot_fired = False
 
-        # Collect all hand bounding boxes first
+        # Get only the closest hand (largest on screen)
+        closest_hand = None
+        closest_idx = -1
         hand_bboxes = []
+
         if results.multi_hand_landmarks:
-            for hand_landmarks in results.multi_hand_landmarks:
-                hand_bbox = self.get_hand_bbox(hand_landmarks, frame.shape)
+            closest_hand, closest_idx = self.get_closest_hand(
+                results.multi_hand_landmarks, frame.shape
+            )
+            if closest_hand:
+                hand_bbox = self.get_hand_bbox(closest_hand, frame.shape)
                 hand_bboxes.append(hand_bbox)
 
-        # Detect and draw bounding box around person (excluding hands)
+        # Detect and draw bounding box around person (excluding the closest hand)
         self.detect_and_draw_person(frame, hand_bboxes)
 
         # Always draw crosshair in center
         self.draw_crosshair(frame)
 
-        if results.multi_hand_landmarks and results.multi_handedness:
-            for idx, (hand_landmarks, handedness) in enumerate(zip(results.multi_hand_landmarks, results.multi_handedness)):
-                # Get hand ID (left or right)
-                hand_id = handedness.classification[0].label
+        # Only process the closest hand
+        if closest_hand is not None and results.multi_handedness:
+            hand_landmarks = closest_hand
+            handedness = results.multi_handedness[closest_idx]
+            hand_id = handedness.classification[0].label
 
-                # Only draw index finger and thumb (the "trigger" parts)
-                self.draw_trigger_skeleton(frame, hand_landmarks)
+            # Only draw index finger and thumb (the "trigger" parts)
+            self.draw_trigger_skeleton(frame, hand_landmarks)
 
-                # Check for finger gun gesture
-                if self.is_finger_gun(hand_landmarks):
-                    finger_gun_detected = True
+            # Check for finger gun gesture
+            if self.is_finger_gun(hand_landmarks):
+                finger_gun_detected = True
 
-                    # Get finger tip position and direction
-                    tip_x, tip_y, dx, dy = self.get_finger_direction(
-                        hand_landmarks.landmark,
-                        frame.shape
-                    )
+                # Get finger tip position and direction
+                tip_x, tip_y, dx, dy = self.get_finger_direction(
+                    hand_landmarks.landmark,
+                    frame.shape
+                )
 
-                    # Detect cocking motion
-                    is_shot = self.detect_cock_motion(hand_landmarks, hand_id)
+                # Detect cocking motion
+                is_shot = self.detect_cock_motion(hand_landmarks, hand_id)
 
-                    if is_shot:
-                        shot_fired = True
-                        # Get hand bounding box to exclude from person detection
-                        hand_bbox = self.get_hand_bbox(hand_landmarks, frame.shape)
-                        # Save the shot image and analyze it
-                        filepath, hand_bbox = self.save_shot(frame, hand_bbox)
-                        analyze_shot(filepath, hand_bbox)
-                        # Draw shot effect
-                        self.draw_shot_effect(frame, tip_x, tip_y, dx, dy)
-                        cv2.putText(frame, "BANG!", (10, 30),
-                                   cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 0, 255), 4)
+                if is_shot:
+                    shot_fired = True
+                    # Get hand bounding box to exclude from person detection
+                    hand_bbox = self.get_hand_bbox(hand_landmarks, frame.shape)
+                    # Save the shot image and analyze it
+                    filepath, hand_bbox = self.save_shot(frame, hand_bbox)
+                    analyze_shot(filepath, hand_bbox)
+                    # Draw shot effect
+                    self.draw_shot_effect(frame, tip_x, tip_y, dx, dy)
+                    cv2.putText(frame, "BANG!", (10, 30),
+                               cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 0, 255), 4)
+                else:
+                    # Draw aiming vector
+                    self.draw_vector(frame, tip_x, tip_y, dx, dy)
+
+                    # Show cocked status with POV-friendly text
+                    if hand_id in self.is_cocked and self.is_cocked[hand_id]:
+                        cv2.putText(frame, "READY", (10, 60),
+                                   cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 255, 0), 3)
                     else:
-                        # Draw aiming vector
-                        self.draw_vector(frame, tip_x, tip_y, dx, dy)
-
-                        # Show cocked status with POV-friendly text
-                        if hand_id in self.is_cocked and self.is_cocked[hand_id]:
-                            cv2.putText(frame, "READY", (10, 60),
-                                       cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 255, 0), 3)
-                        else:
-                            cv2.putText(frame, "AIM", (10, 60),
-                                       cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
+                        cv2.putText(frame, "AIM", (10, 60),
+                                   cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
 
         return frame, shot_fired
 
