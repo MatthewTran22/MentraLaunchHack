@@ -9,6 +9,7 @@ from datetime import datetime
 from ultralytics import YOLO
 from shot_analyzer import analyze_shot
 from webrtc_client import create_video_capture
+import requests
 
 try:
     import pygame
@@ -19,8 +20,11 @@ except ImportError:
     SOUND_ENABLED = False
 
 # WebRTC stream URL
-WEBRTC_PUBLISH_URL = "https://customer-zslwzsqjf4ht8vy9.cloudflarestream.com/ec6905680b6cdc4c6a5f3cdd2f285a54kec573507c5b74ce49b110bae2c75b8a6/webRTC/publish"
-WEBRTC_PLAY_URL = "https://customer-zslwzsqjf4ht8vy9.cloudflarestream.com/ec6905680b6cdc4c6a5f3cdd2f285a54kec573507c5b74ce49b110bae2c75b8a6/webRTC/play"
+data = requests.get("https://gobbler-working-bluebird.ngrok-free.app/url").json()
+WEBRTC_PUBLISH_URL = data["webrtcUrl"]
+print(f"Using WebRTC URL: {WEBRTC_PUBLISH_URL}")
+WEBRTC_PLAY_URL = WEBRTC_PUBLISH_URL.replace("/webRTC/publish", "/webRTC/play")
+print(f"Using WebRTC PLAY URL: {WEBRTC_PLAY_URL}")
 WEBRTC_URL = WEBRTC_PLAY_URL
 
 # High-vis color ranges in HSV

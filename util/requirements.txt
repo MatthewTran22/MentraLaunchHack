@@ -1,5 +1,7 @@
 opencv-python
+numpy<2
 mediapipe
-numpy
 ultralytics
 pygame
+aiortc
+aiohttp
