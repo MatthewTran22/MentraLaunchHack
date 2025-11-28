@@ -230,17 +230,54 @@ class FingerGunDetector:
         # Center dot
         cv2.circle(frame, (center_x, center_y), 2, color, -1)
 
-    def save_shot(self, frame):
+    def get_hand_bbox(self, hand_landmarks, frame_shape):
+        """Get bounding box of the hand"""
+        h, w, _ = frame_shape
+        landmarks = hand_landmarks.landmark
+
+        x_coords = [int(lm.x * w) for lm in landmarks]
+        y_coords = [int(lm.y * h) for lm in landmarks]
+
+        padding = 30
+        x_min = max(0, min(x_coords) - padding)
+        x_max = min(w, max(x_coords) + padding)
+        y_min = max(0, min(y_coords) - padding)
+        y_max = min(h, max(y_coords) + padding)
+
+        return (x_min, y_min, x_max, y_max)
+
+    def save_shot(self, frame, hand_bbox=None):
         """Save the current frame when a shot is fired"""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         filename = f"shot_{timestamp}.jpg"
         filepath = os.path.join(self.shots_dir, filename)
         cv2.imwrite(filepath, frame)
         print(f"Shot saved: {filepath}")
-        return filepath
+        return filepath, hand_bbox
 
-    def detect_and_draw_person(self, frame):
-        """Detect person using YOLOv8n and draw bounding box"""
+    def boxes_overlap(self, box1, box2, threshold=0.3):
+        """Check if two bounding boxes overlap significantly"""
+        x1_1, y1_1, x2_1, y2_1 = box1
+        x1_2, y1_2, x2_2, y2_2 = box2
+
+        # Calculate intersection
+        x1_i = max(x1_1, x1_2)
+        y1_i = max(y1_1, y1_2)
+        x2_i = min(x2_1, x2_2)
+        y2_i = min(y2_1, y2_2)
+
+        if x2_i <= x1_i or y2_i <= y1_i:
+            return False
+
+        intersection = (x2_i - x1_i) * (y2_i - y1_i)
+        area1 = (x2_1 - x1_1) * (y2_1 - y1_1)
+
+        if area1 > 0 and intersection / area1 > threshold:
+            return True
+        return False
+
+    def detect_and_draw_person(self, frame, hand_bboxes):
+        """Detect person using YOLOv8n and draw bounding box, excluding hands"""
         # Run YOLO inference (class 0 = person)
         results = self.yolo(frame, classes=[0], verbose=False)
         person_boxes = []
@@ -251,9 +288,20 @@ class FingerGunDetector:
                 # Get bounding box coordinates
                 x1, y1, x2, y2 = box.xyxy[0].cpu().numpy().astype(int)
                 confidence = box.conf[0].cpu().numpy()
+                person_box = (x1, y1, x2, y2)
+
+                # Skip if this person box overlaps with any detected hand
+                is_hand = False
+                for hand_bbox in hand_bboxes:
+                    if self.boxes_overlap(hand_bbox, person_box):
+                        is_hand = True
+                        break
+
+                if is_hand:
+                    continue
 
                 # Store bounding box
-                person_boxes.append((x1, y1, x2, y2))
+                person_boxes.append(person_box)
 
                 # Draw bounding box
                 cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
@@ -315,8 +363,15 @@ class FingerGunDetector:
         finger_gun_detected = False
         shot_fired = False
 
-        # Detect and draw bounding box around person
-        self.detect_and_draw_person(frame)
+        # Collect all hand bounding boxes first
+        hand_bboxes = []
+        if results.multi_hand_landmarks:
+            for hand_landmarks in results.multi_hand_landmarks:
+                hand_bbox = self.get_hand_bbox(hand_landmarks, frame.shape)
+                hand_bboxes.append(hand_bbox)
+
+        # Detect and draw bounding box around person (excluding hands)
+        self.detect_and_draw_person(frame, hand_bboxes)
 
         # Always draw crosshair in center
         self.draw_crosshair(frame)
@@ -344,9 +399,11 @@ class FingerGunDetector:
 
                     if is_shot:
                         shot_fired = True
+                        # Get hand bounding box to exclude from person detection
+                        hand_bbox = self.get_hand_bbox(hand_landmarks, frame.shape)
                         # Save the shot image and analyze it
-                        filepath = self.save_shot(frame)
-                        analyze_shot(filepath)
+                        filepath, hand_bbox = self.save_shot(frame, hand_bbox)
+                        analyze_shot(filepath, hand_bbox)
                         # Draw shot effect
                         self.draw_shot_effect(frame, tip_x, tip_y, dx, dy)
                         cv2.putText(frame, "BANG!", (10, 30),
