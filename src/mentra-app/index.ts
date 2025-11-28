@@ -22,7 +22,7 @@ import { AppServer, AppSession } from "@mentra/sdk";
 import { setupButtonHandler } from "./event/button";
 import { takePhoto } from "./modules/photo";
 import { setupWebviewRoutes, broadcastTranscriptionToClients, registerSession, unregisterSession } from "./routes/routes";
-import { playAudio, speak } from "./modules/audio";
+// import { playAudio, speak } from "./modules/audio";
 import { setupTranscription } from "./modules/transcription";
 import * as path from "path";
 
@@ -57,6 +57,9 @@ const PORT = parseInt(process.env.PORT || "3000");
 
 class ExampleMentraOSApp extends AppServer {
   private photosMap: Map<string, StoredPhoto> = new Map();
+  private webrtcUrl: string | null = null;
+  private hlsUrl: string | null = null;
+  private dashUrl: string | null = null;
 
   constructor() {
     super({
@@ -76,6 +79,16 @@ class ExampleMentraOSApp extends AppServer {
 
     // Set up all web routes (pass our photos map)
     setupWebviewRoutes(this.getExpressApp(), this.photosMap);
+
+    // Add endpoint to query WebRTC URL
+    this.getExpressApp().get("/url", (_req: any, res: any) => {
+      res.json({
+        webrtcUrl: this.webrtcUrl,
+        hlsUrl: this.hlsUrl,
+        dashUrl: this.dashUrl,
+        status: this.webrtcUrl ? "active" : "inactive"
+      });
+    });
 
     // Check if we should use Vite dev server or serve built files
     const frontendDistPath = path.join(process.cwd(), "src", "frontend", "dist");
@@ -134,24 +147,24 @@ class ExampleMentraOSApp extends AppServer {
     // // await session.audio.speak('Hello from your app!');
 
     // Set up transcription to log all speech-to-text
-    setupTranscription(
-      session,
-      (finalText) => {
-        // Called when transcription is finalized
-        this.logger.info(`[FINAL] Transcription for user ${userId}: ${finalText}`);
-        console.log(`✅ Final transcription (user ${userId}): ${finalText}`);
+    // setupTranscription(
+    //   session,
+    //   (finalText) => {
+    //     // Called when transcription is finalized
+    //     this.logger.info(`[FINAL] Transcription for user ${userId}: ${finalText}`);
+    //     console.log(`✅ Final transcription (user ${userId}): ${finalText}`);
 
-        // Broadcast final transcription to this user's SSE clients only
-        broadcastTranscriptionToClients(finalText, true, userId);
-      },
-      (partialText) => {
-        // Called for interim/partial results (optional)
-        console.log(`⏳ Partial transcription (user ${userId}): ${partialText}`);
+    //     // Broadcast final transcription to this user's SSE clients only
+    //     broadcastTranscriptionToClients(finalText, true, userId);
+    //   },
+    //   (partialText) => {
+    //     // Called for interim/partial results (optional)
+    //     console.log(`⏳ Partial transcription (user ${userId}): ${partialText}`);
 
-        // Broadcast partial transcription to this user's SSE clients only
-        broadcastTranscriptionToClients(partialText, false, userId);
-      }
-    );
+    //     // Broadcast partial transcription to this user's SSE clients only
+    //     broadcastTranscriptionToClients(partialText, false, userId);
+    //   }
+    // );
 
     // Register handler for all touch events
     session.events.onTouchEvent((event) => {
@@ -162,6 +175,39 @@ class ExampleMentraOSApp extends AppServer {
     setupButtonHandler(session, userId, this.logger, (s, u) =>
       takePhoto(s, u, this.logger, this.photosMap)
     );
+
+    // Subscribe to status BEFORE starting
+    const unsubscribe = session.camera.onManagedStreamStatus((status) => {
+      if (status.status === "active") {
+        // URLs are now ready for viewers
+        console.log("HLS:", status.hlsUrl);
+        console.log("DASH:", status.dashUrl);
+        console.log("WebRTC:", status.webrtcUrl);
+
+        // view the webrtc stream in a window
+        this.webrtcUrl = status.webrtcUrl as string;
+        this.hlsUrl = status.hlsUrl as string;
+        this.dashUrl = status.dashUrl as string;
+      } else if (status.status === "error") {
+        console.error("Managed stream error:", status.message);
+      }
+    });
+
+    // Start managed stream
+    const urls = await session.camera.startManagedStream({
+      quality: "720p", // can do 1080p too
+      enableWebRTC: true,
+      // restreamDestinations?: { url: string; name?: string }[]; // optional RTMP fan-out
+    });
+
+    // Note: urls are returned immediately, but viewers should connect only after
+    // a status event reports status === "active".
+
+    // // Stop when done
+    // await session.camera.stopManagedStream();
+
+    // // Cleanup status listener
+    // unsubscribe();
   }
 
   /**
