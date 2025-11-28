@@ -27,8 +27,10 @@ interface LeaderboardResponse {
 
 interface TeamScore {
   name: string;
+  shortName: string;
   score: number;
   color: string;
+  secondaryColor: string;
   accentGlow: string;
   gradientFrom: string;
   gradientTo: string;
@@ -68,8 +70,10 @@ export default function Leaderboard() {
   const [teams, setTeams] = useState<TeamScore[]>([
     {
       name: TEAM_COLORS.yellow.name,
+      shortName: TEAM_COLORS.yellow.shortName,
       score: 0,
       color: TEAM_COLORS.yellow.color,
+      secondaryColor: TEAM_COLORS.yellow.secondaryColor,
       accentGlow: TEAM_COLORS.yellow.accentGlow,
       gradientFrom: TEAM_COLORS.yellow.gradientFrom,
       gradientTo: TEAM_COLORS.yellow.gradientTo,
@@ -77,8 +81,10 @@ export default function Leaderboard() {
     },
     {
       name: TEAM_COLORS.green.name,
+      shortName: TEAM_COLORS.green.shortName,
       score: 0,
       color: TEAM_COLORS.green.color,
+      secondaryColor: TEAM_COLORS.green.secondaryColor,
       accentGlow: TEAM_COLORS.green.accentGlow,
       gradientFrom: TEAM_COLORS.green.gradientFrom,
       gradientTo: TEAM_COLORS.green.gradientTo,
@@ -88,6 +94,7 @@ export default function Leaderboard() {
   const [mounted, setMounted] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [gameTime, setGameTime] = useState(0);
   const [streams, setStreams] = useState<StreamSlot[]>([
     { id: 1, label: 'CAM 01', streamUrl: '', isLive: false },
     { id: 2, label: 'CAM 02', streamUrl: '', isLive: false },
@@ -112,6 +119,7 @@ export default function Leaderboard() {
       const mappedTeams: TeamScore[] = data.teams.map((team) => {
         const teamConfig = TEAM_COLORS[team.team] || {
           color: '#FAFAFA',
+          secondaryColor: '#888888',
           accentGlow: 'rgba(255, 255, 255, 0.5)',
           name: team.team.toUpperCase(),
           gradientFrom: '#FAFAFA',
@@ -120,8 +128,10 @@ export default function Leaderboard() {
         
         return {
           name: teamConfig.name,
+          shortName: teamConfig.shortName,
           score: team.total_score,
           color: teamConfig.color,
+          secondaryColor: teamConfig.secondaryColor,
           accentGlow: teamConfig.accentGlow,
           gradientFrom: teamConfig.gradientFrom,
           gradientTo: teamConfig.gradientTo,
@@ -138,8 +148,10 @@ export default function Leaderboard() {
         if (!teamMap.has(teamConfig.name)) {
           mappedTeams.push({
             name: teamConfig.name,
+            shortName: teamConfig.shortName,
             score: 0,
             color: teamConfig.color,
+            secondaryColor: teamConfig.secondaryColor,
             accentGlow: teamConfig.accentGlow,
             gradientFrom: teamConfig.gradientFrom,
             gradientTo: teamConfig.gradientTo,
@@ -185,8 +197,22 @@ export default function Leaderboard() {
     // Poll for updates every 2 seconds
     const interval = setInterval(fetchLeaderboard, 2000);
     
-    return () => clearInterval(interval);
+    // Game timer
+    const timerInterval = setInterval(() => {
+      setGameTime(prev => prev + 1);
+    }, 1000);
+    
+    return () => {
+      clearInterval(interval);
+      clearInterval(timerInterval);
+    };
   }, [fetchLeaderboard]);
+
+  const formatTime = (seconds: number) => {
+    const mins = Math.floor(seconds / 60);
+    const secs = seconds % 60;
+    return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+  };
 
   const leader = teams.length > 0 && teams.length > 1 
     ? (teams[0].score >= teams[1].score ? 0 : 1)
@@ -195,6 +221,10 @@ export default function Leaderboard() {
   
   // Get all players sorted by score for the ticker
   const allPlayersSorted = [...teams.flatMap(t => t.players)].sort((a, b) => b.score - a.score);
+
+  // Get top scorer across all teams
+  const allPlayers = teams.flatMap(t => t.players);
+  const topScorer = allPlayers.length > 0 ? allPlayers.reduce((a, b) => a.score > b.score ? a : b) : null;
 
   return (
     <div className="h-screen bg-[#0a0a0f] relative overflow-hidden">
