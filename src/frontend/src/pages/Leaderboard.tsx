@@ -1,10 +1,36 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
+
+interface HitCount {
+  target_id: number;
+  target_username: string;
+  hit_count: number;
+}
+
+interface Player {
+  player_id: number;
+  username: string;
+  score: number;
+  team: string;
+  stream_url: string | null;
+  hits_given: HitCount[];
+}
+
+interface TeamLeaderboard {
+  team: string;
+  total_score: number;
+  players: Player[];
+}
+
+interface LeaderboardResponse {
+  teams: TeamLeaderboard[];
+}
 
 interface TeamScore {
   name: string;
   score: number;
   color: string;
   accentGlow: string;
+  players: Player[];
 }
 
 interface StreamSlot {
@@ -12,27 +38,142 @@ interface StreamSlot {
   label: string;
   streamUrl: string;
   isLive: boolean;
+  playerUsername?: string;
 }
 
+// Team color mappings
+const TEAM_COLORS: Record<string, { color: string; accentGlow: string; name: string }> = {
+  yellow: {
+    color: '#FFD93D',
+    accentGlow: 'rgba(255, 217, 61, 0.6)',
+    name: 'Team Yellow',
+  },
+  green: {
+    color: '#4ADE80',
+    accentGlow: 'rgba(74, 222, 128, 0.6)',
+    name: 'Team Green',
+  },
+};
+
 export default function Leaderboard() {
+  // Initialize with default teams to prevent undefined access
   const [teams, setTeams] = useState<TeamScore[]>([
-    { name: 'Team 1', score: 0, color: '#FFD93D', accentGlow: 'rgba(255, 217, 61, 0.6)' },
-    { name: 'Team 2', score: 0, color: '#FAFAFA', accentGlow: 'rgba(255, 255, 255, 0.5)' },
+    {
+      name: TEAM_COLORS.yellow.name,
+      score: 0,
+      color: TEAM_COLORS.yellow.color,
+      accentGlow: TEAM_COLORS.yellow.accentGlow,
+      players: [],
+    },
+    {
+      name: TEAM_COLORS.green.name,
+      score: 0,
+      color: TEAM_COLORS.green.color,
+      accentGlow: TEAM_COLORS.green.accentGlow,
+      players: [],
+    },
   ]);
   const [mounted, setMounted] = useState(false);
-  const [streams] = useState<StreamSlot[]>([
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [streams, setStreams] = useState<StreamSlot[]>([
     { id: 1, label: 'CAM 01', streamUrl: '', isLive: false },
     { id: 2, label: 'CAM 02', streamUrl: '', isLive: false },
     { id: 3, label: 'CAM 03', streamUrl: '', isLive: false },
     { id: 4, label: 'CAM 04', streamUrl: '', isLive: false },
   ]);
 
-  useEffect(() => {
-    setMounted(true);
+  const fetchLeaderboard = useCallback(async () => {
+    try {
+      setError(null);
+      const response = await fetch('https://gobbler-working-bluebird.ngrok-free.app/api/leaderboard', {
+        headers: new Headers({
+          "ngrok-skip-browser-warning": "true", // The value can be anything, but "true" is common
+        }),
+      });
+      if (!response.ok) {
+        throw new Error(`Failed to fetch leaderboard: ${response.statusText}`);
+      }
+      const data: LeaderboardResponse = await response.json();
+      
+      // Map API response to frontend format
+      const mappedTeams: TeamScore[] = data.teams.map((team) => {
+        const teamConfig = TEAM_COLORS[team.team] || {
+          color: '#FAFAFA',
+          accentGlow: 'rgba(255, 255, 255, 0.5)',
+          name: `Team ${team.team}`,
+        };
+        
+        return {
+          name: teamConfig.name,
+          score: team.total_score,
+          color: teamConfig.color,
+          accentGlow: teamConfig.accentGlow,
+          players: team.players,
+        };
+      });
+
+      // Ensure we have at least yellow and green teams (even if empty)
+      const teamMap = new Map(mappedTeams.map(t => [t.name, t]));
+      
+      // Add missing teams with zero scores
+      ['yellow', 'green'].forEach((teamKey) => {
+        const teamConfig = TEAM_COLORS[teamKey];
+        if (!teamMap.has(teamConfig.name)) {
+          mappedTeams.push({
+            name: teamConfig.name,
+            score: 0,
+            color: teamConfig.color,
+            accentGlow: teamConfig.accentGlow,
+            players: [],
+          });
+        }
+      });
+
+      // Sort by score (descending)
+      mappedTeams.sort((a, b) => b.score - a.score);
+      
+      setTeams(mappedTeams);
+
+      // Update streams from player stream_urls
+      const allPlayers = mappedTeams.flatMap(team => team.players);
+      const playersWithStreams = allPlayers.filter(p => p.stream_url);
+      
+      const streamLabels = ['CAM 01', 'CAM 02', 'CAM 03', 'CAM 04'];
+      const updatedStreams: StreamSlot[] = streamLabels.map((label, index) => {
+        const player = playersWithStreams[index];
+        return {
+          id: index + 1,
+          label,
+          streamUrl: player?.stream_url || '',
+          isLive: !!player?.stream_url,
+          playerUsername: player?.username,
+        };
+      });
+      
+      setStreams(updatedStreams);
+      setLoading(false);
+    } catch (err) {
+      console.error('Error fetching leaderboard:', err);
+      setError(err instanceof Error ? err.message : 'Failed to load leaderboard');
+      setLoading(false);
+    }
   }, []);
 
-  const leader = teams[0].score >= teams[1].score ? 0 : 1;
-  const isTie = teams[0].score === teams[1].score;
+  useEffect(() => {
+    setMounted(true);
+    fetchLeaderboard();
+    
+    // Poll for updates every 2 seconds
+    const interval = setInterval(fetchLeaderboard, 2000);
+    
+    return () => clearInterval(interval);
+  }, [fetchLeaderboard]);
+
+  const leader = teams.length > 0 && teams.length > 1 
+    ? (teams[0].score >= teams[1].score ? 0 : 1)
+    : 0;
+  const isTie = teams.length > 1 && teams[0].score === teams[1].score;
 
   return (
     <div className="min-h-screen bg-[#0a0a0a] relative overflow-hidden">
@@ -48,15 +189,15 @@ export default function Leaderboard() {
       <div 
         className="fixed top-[-20%] left-[-10%] w-[50%] h-[60%] rounded-full blur-[120px] opacity-20 transition-opacity duration-1000"
         style={{ 
-          background: teams[0].accentGlow,
-          opacity: mounted ? 0.15 : 0 
+          background: teams[0]?.accentGlow || TEAM_COLORS.yellow.accentGlow,
+          opacity: mounted && teams.length > 0 ? 0.15 : 0 
         }}
       />
       <div 
         className="fixed bottom-[-20%] right-[-10%] w-[50%] h-[60%] rounded-full blur-[120px] opacity-20 transition-opacity duration-1000"
         style={{ 
-          background: teams[1].accentGlow,
-          opacity: mounted ? 0.08 : 0 
+          background: teams[1]?.accentGlow || teams[0]?.accentGlow || TEAM_COLORS.green.accentGlow,
+          opacity: mounted && teams.length > 0 ? 0.08 : 0 
         }}
       />
 
@@ -153,43 +294,54 @@ export default function Leaderboard() {
                   </div>
                 </div>
 
-                {/* Score controls */}
-                <div className="mt-10 flex items-center justify-center gap-4">
-                  <button
-                    onClick={() => {
-                      const newTeams = [...teams];
-                      newTeams[index].score = Math.max(0, newTeams[index].score - 1);
-                      setTeams(newTeams);
-                    }}
-                    className="w-12 h-12 rounded-full flex items-center justify-center transition-all duration-200 hover:scale-110 active:scale-95"
-                    style={{
-                      background: 'rgba(255, 255, 255, 0.05)',
-                      border: '1px solid rgba(255, 255, 255, 0.1)',
-                    }}
+                {/* Players list */}
+                {team.players.length > 0 && (
+                  <div className="mt-8 space-y-3">
+                    <div 
+                      className="text-xs tracking-[0.3em] uppercase mb-4 text-center"
+                      style={{ color: 'rgba(150, 150, 150, 0.5)' }}
+                    >
+                      Players
+                    </div>
+                    {team.players.map((player) => (
+                      <div
+                        key={player.player_id}
+                        className="flex items-center justify-between p-3 rounded-lg"
+                        style={{
+                          background: 'rgba(255, 255, 255, 0.03)',
+                          border: '1px solid rgba(255, 255, 255, 0.05)',
+                        }}
+                      >
+                        <div className="flex items-center gap-3 flex-1">
+                          <div 
+                            className="text-sm font-medium"
+                            style={{ color: 'rgba(200, 200, 200, 0.9)' }}
+                          >
+                            {player.username}
+                          </div>
+                        </div>
+                        <div 
+                          className="text-sm tabular-nums"
+                          style={{ color: team.color }}
+                        >
+                          {player.score}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* Empty state */}
+                {team.players.length === 0 && (
+                  <div 
+                    className="mt-8 text-center py-6"
+                    style={{ color: 'rgba(100, 100, 100, 0.5)' }}
                   >
-                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" style={{ color: 'rgba(200, 200, 200, 0.7)' }}>
-                      <path d="M5 12h14" />
-                    </svg>
-                  </button>
-                  
-                  <button
-                    onClick={() => {
-                      const newTeams = [...teams];
-                      newTeams[index].score += 1;
-                      setTeams(newTeams);
-                    }}
-                    className="w-14 h-14 rounded-full flex items-center justify-center transition-all duration-200 hover:scale-110 active:scale-95"
-                    style={{
-                      background: `linear-gradient(135deg, ${team.color}20, ${team.color}40)`,
-                      border: `1px solid ${team.color}50`,
-                      boxShadow: `0 0 20px -5px ${team.accentGlow}`,
-                    }}
-                  >
-                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" style={{ color: team.color }}>
-                      <path d="M12 5v14M5 12h14" />
-                    </svg>
-                  </button>
-                </div>
+                    <div className="text-xs tracking-[0.2em] uppercase">
+                      No players yet
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
           ))}
@@ -324,7 +476,7 @@ export default function Leaderboard() {
                       fontFamily: "'JetBrains Mono', 'Fira Code', monospace",
                     }}
                   >
-                    {stream.label}
+                    {stream.playerUsername || stream.label}
                   </span>
                 </div>
 
@@ -346,23 +498,54 @@ export default function Leaderboard() {
           </div>
         </div>
 
-        {/* Reset button */}
-        <button
-          onClick={() => {
-            setTeams(teams.map(t => ({ ...t, score: 0 })));
-          }}
-          className={`mt-16 px-8 py-3 rounded-lg text-xs tracking-[0.3em] uppercase transition-all duration-500 hover:bg-[rgba(255,255,255,0.08)] ${
-            mounted ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-4'
-          }`}
-          style={{
-            background: 'rgba(255, 255, 255, 0.03)',
-            border: '1px solid rgba(255, 255, 255, 0.08)',
-            color: 'rgba(150, 150, 150, 0.5)',
-            transitionDelay: '400ms',
-          }}
-        >
-          Reset Scores
-        </button>
+        {/* Loading state */}
+        {loading && (
+          <div 
+            className={`mt-16 text-center transition-all duration-500 ${
+              mounted ? 'opacity-100' : 'opacity-0'
+            }`}
+            style={{ transitionDelay: '400ms' }}
+          >
+            <div 
+              className="text-sm tracking-[0.2em] uppercase"
+              style={{ color: 'rgba(150, 150, 150, 0.5)' }}
+            >
+              Loading...
+            </div>
+          </div>
+        )}
+
+        {/* Error state */}
+        {error && !loading && (
+          <div 
+            className={`mt-16 text-center transition-all duration-500 ${
+              mounted ? 'opacity-100' : 'opacity-0'
+            }`}
+            style={{ transitionDelay: '400ms' }}
+          >
+            <div 
+              className="px-6 py-3 rounded-lg text-sm tracking-[0.2em] uppercase"
+              style={{
+                background: 'rgba(239, 68, 68, 0.1)',
+                border: '1px solid rgba(239, 68, 68, 0.3)',
+                color: 'rgba(239, 68, 68, 0.9)',
+              }}
+            >
+              {error}
+            </div>
+            <button
+              onClick={fetchLeaderboard}
+              className="mt-4 px-4 py-2 rounded text-xs tracking-[0.2em] uppercase"
+              style={{
+                background: 'rgba(255, 255, 255, 0.05)',
+                border: '1px solid rgba(255, 255, 255, 0.1)',
+                color: 'rgba(200, 200, 200, 0.7)',
+              }}
+            >
+              Retry
+            </button>
+          </div>
+        )}
       </div>
 
       {/* Load Google Fonts */}

@@ -16,6 +16,7 @@ from .models import (
     HitCount,
     StreamAssign,
     StreamResponse,
+    TeamLeaderboard,
 )
 
 # Initialize FastAPI app
@@ -39,6 +40,7 @@ app = FastAPI(
     Set `WIPE_DB_ON_STARTUP=true` environment variable to wipe the database on server startup.
     """,
     version="1.0.0",
+    root_path="/api",
     contact={
         "name": "Laser Tag Game API",
     },
@@ -109,7 +111,8 @@ async def root():
                     "example": {
                         "id": 1,
                         "username": "player1",
-                        "score": 0
+                        "score": 0,
+                        "team": "yellow"
                     }
                 }
             }
@@ -134,6 +137,7 @@ async def create_player(player: PlayerCreate):
     and starts with a score of 0.
     
     - **username**: Must be unique and between 1-100 characters
+    - **team**: Must be either "yellow" or "green"
     - Returns the player ID which is used for hit tracking
     
     **Note**: Usernames must be unique. If a username already exists, a 400 error is returned.
@@ -153,11 +157,12 @@ async def create_player(player: PlayerCreate):
     player_data = {
         "username": player.username,
         "score": 0,
+        "team": player.team,
         "stream_url": None,
     }
     player_id = players_table.insert(player_data)
     
-    return PlayerResponse(id=player_id, username=player.username, score=0, stream_url=None)
+    return PlayerResponse(id=player_id, username=player.username, score=0, team=player.team, stream_url=None)
 
 
 @app.post(
@@ -337,42 +342,70 @@ async def record_hit(hit: HitCreate):
     response_model=LeaderboardResponse,
     tags=["Leaderboard"],
     summary="Get leaderboard",
-    description="Get the complete leaderboard with player scores and detailed hit statistics",
+    description="Get the complete leaderboard with team scores and detailed hit statistics",
     responses={
         200: {
             "description": "Leaderboard retrieved successfully",
             "content": {
                 "application/json": {
                     "example": {
-                        "players": [
+                        "teams": [
                             {
-                                "player_id": 1,
-                                "username": "player1",
-                                "score": 10,
-                                "stream_url": "rtmp://example.com/live/stream1",
-                                "hits_given": [
+                                "team": "yellow",
+                                "total_score": 25,
+                                "players": [
                                     {
-                                        "target_id": 2,
-                                        "target_username": "player2",
-                                        "hit_count": 5
+                                        "player_id": 1,
+                                        "username": "player1",
+                                        "score": 15,
+                                        "team": "yellow",
+                                        "stream_url": "rtmp://example.com/live/stream1",
+                                        "hits_given": [
+                                            {
+                                                "target_id": 2,
+                                                "target_username": "player2",
+                                                "hit_count": 5
+                                            },
+                                            {
+                                                "target_id": 3,
+                                                "target_username": "player3",
+                                                "hit_count": 10
+                                            }
+                                        ]
                                     },
                                     {
-                                        "target_id": 3,
-                                        "target_username": "player3",
-                                        "hit_count": 5
+                                        "player_id": 3,
+                                        "username": "player3",
+                                        "score": 10,
+                                        "team": "yellow",
+                                        "stream_url": "rtmp://example.com/live/stream3",
+                                        "hits_given": [
+                                            {
+                                                "target_id": 2,
+                                                "target_username": "player2",
+                                                "hit_count": 10
+                                            }
+                                        ]
                                     }
                                 ]
                             },
                             {
-                                "player_id": 2,
-                                "username": "player2",
-                                "score": 7,
-                                "stream_url": "rtmp://example.com/live/stream2",
-                                "hits_given": [
+                                "team": "green",
+                                "total_score": 7,
+                                "players": [
                                     {
-                                        "target_id": 1,
-                                        "target_username": "player1",
-                                        "hit_count": 7
+                                        "player_id": 2,
+                                        "username": "player2",
+                                        "score": 7,
+                                        "team": "green",
+                                        "stream_url": "rtmp://example.com/live/stream2",
+                                        "hits_given": [
+                                            {
+                                                "target_id": 1,
+                                                "target_username": "player1",
+                                                "hit_count": 7
+                                            }
+                                        ]
                                     }
                                 ]
                             }
@@ -385,15 +418,17 @@ async def record_hit(hit: HitCreate):
 )
 async def get_leaderboard():
     """
-    Get the leaderboard with players, scores, and hit statistics.
+    Get the leaderboard with teams, players, scores, and hit statistics.
     
     Returns a complete leaderboard showing:
-    - All players sorted by score (highest first)
+    - Teams sorted by total score (highest first)
+    - Each team's total score
+    - Players within each team sorted by score (highest first)
     - Each player's current score
     - Detailed statistics showing who each player hit and how many times
     
-    The leaderboard is sorted in descending order by score, so the player with
-    the highest score appears first.
+    The leaderboard is sorted in descending order by team total score, so the team with
+    the highest total score appears first.
     """
     db = get_db()
     players_table = db["players"]
@@ -402,11 +437,12 @@ async def get_leaderboard():
     # Get all players
     all_players = list(players_table.all())
     
-    # Build leaderboard
-    leaderboard = []
+    # Group players by team
+    teams_dict = {}
     
     for player in all_players:
         player_id = player["id"]
+        team = player.get("team", "yellow")  # Default to yellow if team not set
         
         # Get all hits made by this player
         hits_by_player = list(hits_table.find(hitter_id=player_id))
@@ -430,20 +466,41 @@ async def get_leaderboard():
                     )
                 )
         
-        leaderboard.append(
-            PlayerLeaderboard(
-                player_id=player_id,
-                username=player["username"],
-                score=player["score"],
-                stream_url=player.get("stream_url"),
-                hits_given=hits_given,
+        player_entry = PlayerLeaderboard(
+            player_id=player_id,
+            username=player["username"],
+            score=player["score"],
+            team=team,
+            stream_url=player.get("stream_url"),
+            hits_given=hits_given,
+        )
+        
+        # Add player to their team
+        if team not in teams_dict:
+            teams_dict[team] = []
+        teams_dict[team].append(player_entry)
+    
+    # Build team leaderboard
+    team_leaderboards = []
+    for team_name, players in teams_dict.items():
+        # Sort players by score (descending)
+        players.sort(key=lambda x: x.score, reverse=True)
+        
+        # Calculate total team score
+        total_score = sum(player.score for player in players)
+        
+        team_leaderboards.append(
+            TeamLeaderboard(
+                team=team_name,
+                total_score=total_score,
+                players=players,
             )
         )
     
-    # Sort by score (descending)
-    leaderboard.sort(key=lambda x: x.score, reverse=True)
+    # Sort teams by total score (descending)
+    team_leaderboards.sort(key=lambda x: x.total_score, reverse=True)
     
-    return LeaderboardResponse(players=leaderboard)
+    return LeaderboardResponse(teams=team_leaderboards)
 
 
 @app.get(
