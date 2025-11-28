@@ -2,6 +2,10 @@ import cv2
 import mediapipe as mp
 import numpy as np
 import math
+import os
+from datetime import datetime
+from ultralytics import YOLO
+from shot_analyzer import analyze_shot
 
 class FingerGunDetector:
     def __init__(self):
@@ -13,6 +17,14 @@ class FingerGunDetector:
             min_tracking_confidence=0.7
         )
         self.mp_draw = mp.solutions.drawing_utils
+
+        # Person detection using YOLOv8n
+        self.yolo = YOLO('yolov8n.pt')
+
+        # Directory to save shot images
+        self.save_dir = os.path.dirname(os.path.abspath(__file__))
+        self.shots_dir = os.path.join(self.save_dir, 'shots')
+        os.makedirs(self.shots_dir, exist_ok=True)
 
         # Track thumb position for cocking detection
         self.prev_thumb_y = {}  # Store previous thumb Y position for each hand
@@ -71,17 +83,40 @@ class FingerGunDetector:
     def get_finger_direction(self, landmarks, frame_shape):
         h, w, _ = frame_shape
 
-        # Get index finger tip (landmark 8) and PIP joint (landmark 6)
-        tip = landmarks[8]
-        pip = landmarks[6]
+        # For FPV: Use wrist, MCP (base of index), and fingertip to calculate 3D direction
+        wrist = landmarks[0]
+        mcp = landmarks[5]   # Base of index finger
+        pip = landmarks[6]   # Middle joint of index
+        tip = landmarks[8]   # Fingertip
 
-        # Convert normalized coordinates to pixel coordinates
+        # Convert to pixel coordinates
         tip_x, tip_y = int(tip.x * w), int(tip.y * h)
-        pip_x, pip_y = int(pip.x * w), int(pip.y * h)
+        mcp_x, mcp_y = int(mcp.x * w), int(mcp.y * h)
 
-        # Calculate direction vector
-        dx = tip_x - pip_x
-        dy = tip_y - pip_y
+        # Calculate 3D direction vector from MCP to tip
+        dx_3d = tip.x - mcp.x
+        dy_3d = tip.y - mcp.y
+        dz_3d = tip.z - mcp.z  # Negative Z = pointing toward camera/forward
+
+        # For FPV, when finger points forward (into screen), Z is dominant
+        # We need to project the 3D vector onto the 2D screen
+
+        # Check if pointing primarily forward (Z-dominant)
+        xy_magnitude = math.sqrt(dx_3d**2 + dy_3d**2)
+        z_magnitude = abs(dz_3d)
+
+        if z_magnitude > xy_magnitude * 0.3 and dz_3d < 0:
+            # Finger is pointing forward - use fingertip position relative to screen center
+            # as the aiming direction (like a laser pointer)
+            center_x, center_y = w // 2, h // 2
+
+            # Vector from center of screen toward fingertip position
+            dx = tip_x - center_x
+            dy = tip_y - center_y
+        else:
+            # Traditional side-pointing - use finger bone direction
+            dx = tip_x - mcp_x
+            dy = tip_y - mcp_y
 
         # Normalize the vector
         length = math.sqrt(dx**2 + dy**2)
@@ -133,6 +168,103 @@ class FingerGunDetector:
 
         return shot_fired
 
+    def draw_trigger_skeleton(self, frame, hand_landmarks):
+        """Draw only the index finger and thumb (trigger mechanism)"""
+        landmarks = hand_landmarks.landmark
+        h, w, _ = frame.shape
+
+        # Index finger landmarks: 5 (MCP), 6 (PIP), 7 (DIP), 8 (tip)
+        index_points = [5, 6, 7, 8]
+        # Thumb landmarks: 1 (CMC), 2 (MCP), 3 (IP), 4 (tip)
+        thumb_points = [1, 2, 3, 4]
+        # Wrist for connection
+        wrist = 0
+
+        # Convert landmarks to pixel coordinates
+        def get_point(idx):
+            lm = landmarks[idx]
+            return (int(lm.x * w), int(lm.y * h))
+
+        # Draw index finger
+        for i in range(len(index_points) - 1):
+            pt1 = get_point(index_points[i])
+            pt2 = get_point(index_points[i + 1])
+            cv2.line(frame, pt1, pt2, (0, 255, 0), 3)
+            cv2.circle(frame, pt1, 4, (0, 255, 0), -1)
+        cv2.circle(frame, get_point(index_points[-1]), 4, (0, 255, 0), -1)
+
+        # Draw thumb
+        for i in range(len(thumb_points) - 1):
+            pt1 = get_point(thumb_points[i])
+            pt2 = get_point(thumb_points[i + 1])
+            cv2.line(frame, pt1, pt2, (255, 0, 0), 3)
+            cv2.circle(frame, pt1, 4, (255, 0, 0), -1)
+        cv2.circle(frame, get_point(thumb_points[-1]), 4, (255, 0, 0), -1)
+
+        # Connect wrist to index MCP and thumb CMC
+        wrist_pt = get_point(wrist)
+        cv2.line(frame, wrist_pt, get_point(5), (0, 255, 0), 2)
+        cv2.line(frame, wrist_pt, get_point(1), (255, 0, 0), 2)
+        cv2.circle(frame, wrist_pt, 5, (255, 255, 255), -1)
+
+    def draw_crosshair(self, frame):
+        """Draw a crosshair in the center of the screen"""
+        h, w, _ = frame.shape
+        center_x, center_y = w // 2, h // 2
+        size = 20
+        gap = 5
+
+        # Draw crosshair lines with gap in center
+        color = (0, 255, 255)  # Cyan
+        thickness = 2
+
+        # Top
+        cv2.line(frame, (center_x, center_y - gap - size), (center_x, center_y - gap), color, thickness)
+        # Bottom
+        cv2.line(frame, (center_x, center_y + gap), (center_x, center_y + gap + size), color, thickness)
+        # Left
+        cv2.line(frame, (center_x - gap - size, center_y), (center_x - gap, center_y), color, thickness)
+        # Right
+        cv2.line(frame, (center_x + gap, center_y), (center_x + gap + size, center_y), color, thickness)
+
+        # Center dot
+        cv2.circle(frame, (center_x, center_y), 2, color, -1)
+
+    def save_shot(self, frame):
+        """Save the current frame when a shot is fired"""
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        filename = f"shot_{timestamp}.jpg"
+        filepath = os.path.join(self.shots_dir, filename)
+        cv2.imwrite(filepath, frame)
+        print(f"Shot saved: {filepath}")
+        return filepath
+
+    def detect_and_draw_person(self, frame):
+        """Detect person using YOLOv8n and draw bounding box"""
+        # Run YOLO inference (class 0 = person)
+        results = self.yolo(frame, classes=[0], verbose=False)
+        person_boxes = []
+
+        for result in results:
+            boxes = result.boxes
+            for box in boxes:
+                # Get bounding box coordinates
+                x1, y1, x2, y2 = box.xyxy[0].cpu().numpy().astype(int)
+                confidence = box.conf[0].cpu().numpy()
+
+                # Store bounding box
+                person_boxes.append((x1, y1, x2, y2))
+
+                # Draw bounding box
+                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
+
+                # Draw label with confidence
+                label = f"PERSON {confidence:.2f}"
+                cv2.putText(frame, label, (x1, y1 - 10),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+
+        return person_boxes
+
     def draw_vector(self, frame, start_x, start_y, dx, dy, length=300):
         # Calculate end point of vector
         end_x = int(start_x + dx * length)
@@ -183,19 +315,19 @@ class FingerGunDetector:
         finger_gun_detected = False
         shot_fired = False
 
+        # Detect and draw bounding box around person
+        self.detect_and_draw_person(frame)
+
+        # Always draw crosshair in center
+        self.draw_crosshair(frame)
+
         if results.multi_hand_landmarks and results.multi_handedness:
             for idx, (hand_landmarks, handedness) in enumerate(zip(results.multi_hand_landmarks, results.multi_handedness)):
                 # Get hand ID (left or right)
                 hand_id = handedness.classification[0].label
 
-                # Draw hand landmarks
-                self.mp_draw.draw_landmarks(
-                    frame,
-                    hand_landmarks,
-                    self.mp_hands.HAND_CONNECTIONS,
-                    self.mp_draw.DrawingSpec(color=(0, 255, 0), thickness=2, circle_radius=2),
-                    self.mp_draw.DrawingSpec(color=(255, 0, 0), thickness=2)
-                )
+                # Only draw index finger and thumb (the "trigger" parts)
+                self.draw_trigger_skeleton(frame, hand_landmarks)
 
                 # Check for finger gun gesture
                 if self.is_finger_gun(hand_landmarks):
@@ -212,6 +344,9 @@ class FingerGunDetector:
 
                     if is_shot:
                         shot_fired = True
+                        # Save the shot image and analyze it
+                        filepath = self.save_shot(frame)
+                        analyze_shot(filepath)
                         # Draw shot effect
                         self.draw_shot_effect(frame, tip_x, tip_y, dx, dy)
                         cv2.putText(frame, "BANG!", (10, 30),
