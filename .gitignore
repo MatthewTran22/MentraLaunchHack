@@ -11,6 +11,11 @@ bun.lock
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log* 
+
+
+**.db**
+**__pycache__**
+
 /venv/
 yolov8n.pt
 /utils/shots/
