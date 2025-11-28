@@ -14,6 +14,8 @@ from .models import (
     PlayerLeaderboard,
     PlayerResponse,
     HitCount,
+    StreamAssign,
+    StreamResponse,
 )
 
 # Initialize FastAPI app
@@ -151,27 +153,28 @@ async def create_player(player: PlayerCreate):
     player_data = {
         "username": player.username,
         "score": 0,
+        "stream_url": None,
     }
     player_id = players_table.insert(player_data)
     
-    return PlayerResponse(id=player_id, username=player.username, score=0)
+    return PlayerResponse(id=player_id, username=player.username, score=0, stream_url=None)
 
 
-@app.get(
-    "/players/{player_id}",
-    response_model=PlayerResponse,
+@app.post(
+    "/players/stream",
+    response_model=StreamResponse,
+    status_code=status.HTTP_200_OK,
     tags=["Players"],
-    summary="Get player information",
-    description="Retrieve player information by their unique ID",
+    summary="Assign stream to player",
+    description="Assign a stream URL to a player by their username",
     responses={
         200: {
-            "description": "Player found",
+            "description": "Stream assigned successfully",
             "content": {
                 "application/json": {
                     "example": {
-                        "id": 1,
                         "username": "player1",
-                        "score": 5
+                        "stream_url": "rtmp://example.com/live/stream1"
                     }
                 }
             }
@@ -181,32 +184,46 @@ async def create_player(player: PlayerCreate):
             "content": {
                 "application/json": {
                     "example": {
-                        "detail": "Player with ID 999 not found"
+                        "detail": "Player with username 'player1' not found"
                     }
                 }
             }
         }
     }
 )
-async def get_player(player_id: int):
+async def assign_stream(stream: StreamAssign):
     """
-    Get player information by ID.
+    Assign a stream URL to a player.
     
-    Retrieves the current information for a player including their username and score.
+    This endpoint assigns a stream URL to a player identified by their username.
+    The stream URL is stored in the database and can be retrieved when querying player information.
     
-    - **player_id**: The unique ID of the player (returned when creating a player)
+    - **username**: The username of the player to assign the stream to
+    - **stream_url**: The stream URL to assign
+    
+    **Note**: If the player doesn't exist, a 404 error is returned.
     """
     db = get_db()
     players_table = db["players"]
     
-    player = players_table.find_one(id=player_id)
+    # Check if player exists
+    player = players_table.find_one(username=stream.username)
     if not player:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Player with ID {player_id} not found"
+            detail=f"Player with username '{stream.username}' not found"
         )
     
-    return PlayerResponse(**player)
+    # Update player with stream URL
+    players_table.update(
+        {"id": player["id"], "stream_url": stream.stream_url},
+        ["id"]
+    )
+    
+    return StreamResponse(
+        username=stream.username,
+        stream_url=stream.stream_url
+    )
 
 
 @app.post(
@@ -245,7 +262,7 @@ async def get_player(player_id: int):
             "content": {
                 "application/json": {
                     "example": {
-                        "detail": "Hitter with ID 999 not found"
+                        "detail": "Hitter with username 'player1' not found"
                     }
                 }
             }
@@ -259,8 +276,8 @@ async def record_hit(hit: HitCreate):
     This endpoint records when one player hits another player. The hitter's score
     is automatically incremented by 1 point.
     
-    - **hitter_id**: The ID of the player who made the hit
-    - **target_id**: The ID of the player who was hit
+    - **hitter_username**: The username of the player who made the hit
+    - **target_username**: The username of the player who was hit
     
     **Rules**:
     - Players cannot hit themselves (returns 400 error)
@@ -271,39 +288,42 @@ async def record_hit(hit: HitCreate):
     players_table = db["players"]
     hits_table = db["hits"]
     
-    # Validate players exist
-    hitter = players_table.find_one(id=hit.hitter_id)
+    # Validate players exist by username
+    hitter = players_table.find_one(username=hit.hitter_username)
     if not hitter:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Hitter with ID {hit.hitter_id} not found"
+            detail=f"Hitter with username '{hit.hitter_username}' not found"
         )
     
-    target = players_table.find_one(id=hit.target_id)
+    target = players_table.find_one(username=hit.target_username)
     if not target:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Target with ID {hit.target_id} not found"
+            detail=f"Target with username '{hit.target_username}' not found"
         )
     
     # Prevent self-hits
-    if hit.hitter_id == hit.target_id:
+    if hit.hitter_username == hit.target_username:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Players cannot hit themselves"
         )
     
+    hitter_id = hitter["id"]
+    target_id = target["id"]
+    
     # Record the hit
     hit_data = {
-        "hitter_id": hit.hitter_id,
-        "target_id": hit.target_id,
+        "hitter_id": hitter_id,
+        "target_id": target_id,
         "timestamp": datetime.utcnow(),
     }
     hit_id = hits_table.insert(hit_data)
     
     # Update scores: hitter gets +1 point
     players_table.update(
-        {"id": hit.hitter_id, "score": hitter["score"] + 1},
+        {"id": hitter_id, "score": hitter.get("score", 0) + 1},
         ["id"]
     )
     
@@ -329,6 +349,7 @@ async def record_hit(hit: HitCreate):
                                 "player_id": 1,
                                 "username": "player1",
                                 "score": 10,
+                                "stream_url": "rtmp://example.com/live/stream1",
                                 "hits_given": [
                                     {
                                         "target_id": 2,
@@ -346,6 +367,7 @@ async def record_hit(hit: HitCreate):
                                 "player_id": 2,
                                 "username": "player2",
                                 "score": 7,
+                                "stream_url": "rtmp://example.com/live/stream2",
                                 "hits_given": [
                                     {
                                         "target_id": 1,
@@ -413,6 +435,7 @@ async def get_leaderboard():
                 player_id=player_id,
                 username=player["username"],
                 score=player["score"],
+                stream_url=player.get("stream_url"),
                 hits_given=hits_given,
             )
         )
