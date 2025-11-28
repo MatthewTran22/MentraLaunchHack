@@ -7,6 +7,18 @@ from datetime import datetime
 from ultralytics import YOLO
 from shot_analyzer import analyze_shot
 
+# High-vis color ranges in HSV
+HIGHVIS_YELLOW_LOWER = np.array([20, 100, 100])
+HIGHVIS_YELLOW_UPPER = np.array([45, 255, 255])
+
+HIGHVIS_ORANGE_LOWER = np.array([5, 150, 150])
+HIGHVIS_ORANGE_UPPER = np.array([20, 255, 255])
+
+HIGHVIS_GREEN_LOWER = np.array([45, 100, 100])
+HIGHVIS_GREEN_UPPER = np.array([75, 255, 255])
+
+MIN_HIGHVIS_AREA = 500
+
 class FingerGunDetector:
     def __init__(self):
         self.mp_hands = mp.solutions.hands
@@ -32,6 +44,10 @@ class FingerGunDetector:
         self.cock_threshold = 0.02  # Minimum movement to register as cocking
         self.shoot_cooldown = {}  # Prevent rapid fire
         self.cooldown_frames = 10
+
+        # Team counts
+        self.highvis_count = 0
+        self.regular_count = 0
 
     def is_finger_extended(self, landmarks, finger_tip_id, finger_pip_id):
         tip = landmarks[finger_tip_id]
@@ -298,11 +314,60 @@ class FingerGunDetector:
             return True
         return False
 
+    def detect_highvis_regions(self, frame):
+        """Detect regions with high-visibility colors."""
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+
+        mask_yellow = cv2.inRange(hsv, HIGHVIS_YELLOW_LOWER, HIGHVIS_YELLOW_UPPER)
+        mask_orange = cv2.inRange(hsv, HIGHVIS_ORANGE_LOWER, HIGHVIS_ORANGE_UPPER)
+        mask_green = cv2.inRange(hsv, HIGHVIS_GREEN_LOWER, HIGHVIS_GREEN_UPPER)
+
+        combined_mask = cv2.bitwise_or(mask_yellow, mask_orange)
+        combined_mask = cv2.bitwise_or(combined_mask, mask_green)
+
+        kernel = np.ones((5, 5), np.uint8)
+        combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_OPEN, kernel)
+        combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_CLOSE, kernel)
+        combined_mask = cv2.dilate(combined_mask, kernel, iterations=2)
+
+        return combined_mask
+
+    def classify_person_team(self, frame, x, y, w, h, highvis_mask):
+        """Classify if a person is wearing high-vis or not."""
+        # Focus on upper body / torso area (where vest would be)
+        upper_y = y + int(h * 0.15)
+        upper_h = int(h * 0.45)
+
+        upper_y = max(0, upper_y)
+        upper_x = max(0, x)
+        end_y = min(frame.shape[0], upper_y + upper_h)
+        end_x = min(frame.shape[1], x + w)
+
+        roi_mask = highvis_mask[upper_y:end_y, upper_x:end_x]
+
+        if roi_mask.size == 0:
+            return False, 0
+
+        highvis_pixels = cv2.countNonZero(roi_mask)
+        total_pixels = roi_mask.size
+        percentage = (highvis_pixels / total_pixels) * 100
+
+        is_highvis = percentage > 3 and highvis_pixels > MIN_HIGHVIS_AREA
+
+        return is_highvis, percentage
+
     def detect_and_draw_person(self, frame, hand_bboxes):
-        """Detect person using YOLOv8n and draw bounding box, excluding hands"""
+        """Detect person using YOLOv8n and draw bounding box with team classification, excluding hands"""
         # Run YOLO inference (class 0 = person)
         results = self.yolo(frame, classes=[0], verbose=False)
         person_boxes = []
+
+        # Get high-vis mask for team classification
+        highvis_mask = self.detect_highvis_regions(frame)
+
+        # Reset counts
+        self.highvis_count = 0
+        self.regular_count = 0
 
         for result in results:
             boxes = result.boxes
@@ -311,6 +376,7 @@ class FingerGunDetector:
                 x1, y1, x2, y2 = box.xyxy[0].cpu().numpy().astype(int)
                 confidence = box.conf[0].cpu().numpy()
                 person_box = (x1, y1, x2, y2)
+                w, h = x2 - x1, y2 - y1
 
                 # Skip if this person box overlaps with any detected hand
                 is_hand = False
@@ -322,16 +388,41 @@ class FingerGunDetector:
                 if is_hand:
                     continue
 
-                # Store bounding box
-                person_boxes.append(person_box)
+                # Classify team
+                is_highvis, hv_percentage = self.classify_person_team(frame, x1, y1, w, h, highvis_mask)
+
+                if is_highvis:
+                    color = (0, 255, 0)  # Green for high-vis
+                    label = "HIGH-VIS"
+                    self.highvis_count += 1
+                else:
+                    color = (255, 100, 0)  # Blue for regular
+                    label = "REGULAR"
+                    self.regular_count += 1
+
+                # Store bounding box with team info
+                person_boxes.append((x1, y1, x2, y2, is_highvis))
 
                 # Draw bounding box
-                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
+                cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+
+                # Draw corner accents
+                corner_len = min(20, w // 4, h // 4)
+                cv2.line(frame, (x1, y1), (x1 + corner_len, y1), color, 4)
+                cv2.line(frame, (x1, y1), (x1, y1 + corner_len), color, 4)
+                cv2.line(frame, (x2, y1), (x2 - corner_len, y1), color, 4)
+                cv2.line(frame, (x2, y1), (x2, y1 + corner_len), color, 4)
+                cv2.line(frame, (x1, y2), (x1 + corner_len, y2), color, 4)
+                cv2.line(frame, (x1, y2), (x1, y2 - corner_len), color, 4)
+                cv2.line(frame, (x2, y2), (x2 - corner_len, y2), color, 4)
+                cv2.line(frame, (x2, y2), (x2, y2 - corner_len), color, 4)
 
                 # Draw label with confidence
-                label = f"PERSON {confidence:.2f}"
-                cv2.putText(frame, label, (x1, y1 - 10),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                label_text = f"{label} {int(confidence * 100)}%"
+                label_size, _ = cv2.getTextSize(label_text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+                cv2.rectangle(frame, (x1, y1 - 25), (x1 + label_size[0] + 10, y1), color, -1)
+                cv2.putText(frame, label_text, (x1 + 5, y1 - 7),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
 
         return person_boxes
 
@@ -455,21 +546,25 @@ class FingerGunDetector:
         self.hands.close()
 
 def main():
+    print("=" * 50)
+    print("FINGER GUN GAME")
+    print("=" * 50)
+    print("\nHold your hand in a finger gun gesture")
+    print("Pull your thumb back to cock, release forward to shoot")
+    print("Teams: GREEN = High-Vis | BLUE = Regular")
+    print("Press 'Q' to quit")
+    print("=" * 50)
+
     # Initialize detector
     detector = FingerGunDetector()
 
-    # Open webcam (Meta Ray-Bans typically appear as camera device)
+    # Open webcam
     cap = cv2.VideoCapture(0)
 
     if not cap.isOpened():
         print("Error: Could not open camera")
-        print("Make sure your Meta Ray-Bans are connected and recognized as a camera device")
+        print("Make sure your camera is connected and recognized")
         return
-
-    print("POV Finger Gun Detector Started!")
-    print("Hold your hand in front of the camera in a finger gun gesture")
-    print("Pull your thumb back to cock, release forward to shoot")
-    print("Press 'q' to quit")
 
     while True:
         ret, frame = cap.read()
@@ -478,10 +573,15 @@ def main():
             break
 
         # Process frame
-        processed_frame, detected = detector.process_frame(frame)
+        processed_frame, shot_fired = detector.process_frame(frame)
+
+        # Draw team count on screen
+        h, w = processed_frame.shape[:2]
+        cv2.putText(processed_frame, f"High-Vis: {detector.highvis_count} | Regular: {detector.regular_count}",
+                   (w - 350, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
 
         # Display frame
-        cv2.imshow('Finger Gun Detector', processed_frame)
+        cv2.imshow('Finger Gun Game', processed_frame)
 
         # Check for quit
         if cv2.waitKey(1) & 0xFF == ord('q'):
@@ -491,7 +591,8 @@ def main():
     cap.release()
     cv2.destroyAllWindows()
     detector.release()
-    print("Application closed")
+    print("\nGame ended. Thanks for playing!")
+
 
 if __name__ == "__main__":
     main()
