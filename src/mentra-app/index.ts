@@ -176,38 +176,28 @@ class ExampleMentraOSApp extends AppServer {
       takePhoto(s, u, this.logger, this.photosMap)
     );
 
-    // Subscribe to status BEFORE starting
-    const unsubscribe = session.camera.onManagedStreamStatus((status) => {
+    const cleanup = session.camera.onStreamStatus((status) => {
+      console.log("RTMP status:", status.status);
       if (status.status === "active") {
-        // URLs are now ready for viewers
-        console.log("HLS:", status.hlsUrl);
-        console.log("DASH:", status.dashUrl);
-        console.log("WebRTC:", status.webrtcUrl);
-
-        // view the webrtc stream in a window
-        this.webrtcUrl = status.webrtcUrl as string;
-        this.hlsUrl = status.hlsUrl as string;
-        this.dashUrl = status.dashUrl as string;
-      } else if (status.status === "error") {
-        console.error("Managed stream error:", status.message);
+        console.log("Streaming to:", session.camera.getCurrentStreamUrl());
+      }
+      if (status.status === "error") {
+        console.error(status.errorDetails);
       }
     });
 
-    // Start managed stream
-    const urls = await session.camera.startManagedStream({
-      quality: "720p", // can do 1080p too
-      enableWebRTC: true,
-      // restreamDestinations?: { url: string; name?: string }[]; // optional RTMP fan-out
+    await session.camera.startStream({
+      rtmpUrl: "rtmp://192.168.50.149:1935/live/stream",
     });
 
     // Note: urls are returned immediately, but viewers should connect only after
     // a status event reports status === "active".
 
     // // Stop when done
-    // await session.camera.stopManagedStream();
+    // await session.camera.stopStream();
 
     // // Cleanup status listener
-    // unsubscribe();
+    // cleanup();
   }
 
   /**
