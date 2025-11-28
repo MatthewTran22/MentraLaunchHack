@@ -46,7 +46,7 @@ interface StreamSlot {
 }
 
 // Team color mappings - sports broadcast style
-const TEAM_COLORS: Record<string, { color: string; accentGlow: string; name: string; gradientFrom: string; gradientTo: string; abbrev: string }> = {
+const TEAM_COLORS: Record<string, { color: string; accentGlow: string; name: string; gradientFrom: string; gradientTo: string; abbrev: string; shortName: string; secondaryColor: string }> = {
   yellow: {
     color: '#FFD93D',
     accentGlow: 'rgba(255, 217, 61, 0.8)',
@@ -54,6 +54,8 @@ const TEAM_COLORS: Record<string, { color: string; accentGlow: string; name: str
     gradientFrom: '#FFD93D',
     gradientTo: '#F59E0B',
     abbrev: 'YLW',
+    shortName: 'YLW',
+    secondaryColor: '#F59E0B',
   },
   green: {
     color: '#4ADE80',
@@ -62,6 +64,8 @@ const TEAM_COLORS: Record<string, { color: string; accentGlow: string; name: str
     gradientFrom: '#4ADE80',
     gradientTo: '#22C55E',
     abbrev: 'GRN',
+    shortName: 'GRN',
+    secondaryColor: '#22C55E',
   },
 };
 
@@ -94,7 +98,6 @@ export default function Leaderboard() {
   const [mounted, setMounted] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [gameTime, setGameTime] = useState(0);
   const [streams, setStreams] = useState<StreamSlot[]>([
     { id: 1, label: 'CAM 01', streamUrl: '', isLive: false },
     { id: 2, label: 'CAM 02', streamUrl: '', isLive: false },
@@ -122,6 +125,7 @@ export default function Leaderboard() {
           secondaryColor: '#888888',
           accentGlow: 'rgba(255, 255, 255, 0.5)',
           name: team.team.toUpperCase(),
+          shortName: team.team.toUpperCase().slice(0, 3),
           gradientFrom: '#FAFAFA',
           gradientTo: '#E5E5E5',
         };
@@ -197,22 +201,10 @@ export default function Leaderboard() {
     // Poll for updates every 2 seconds
     const interval = setInterval(fetchLeaderboard, 2000);
     
-    // Game timer
-    const timerInterval = setInterval(() => {
-      setGameTime(prev => prev + 1);
-    }, 1000);
-    
     return () => {
       clearInterval(interval);
-      clearInterval(timerInterval);
     };
   }, [fetchLeaderboard]);
-
-  const formatTime = (seconds: number) => {
-    const mins = Math.floor(seconds / 60);
-    const secs = seconds % 60;
-    return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
-  };
 
   const leader = teams.length > 0 && teams.length > 1 
     ? (teams[0].score >= teams[1].score ? 0 : 1)
@@ -221,10 +213,6 @@ export default function Leaderboard() {
   
   // Get all players sorted by score for the ticker
   const allPlayersSorted = [...teams.flatMap(t => t.players)].sort((a, b) => b.score - a.score);
-
-  // Get top scorer across all teams
-  const allPlayers = teams.flatMap(t => t.players);
-  const topScorer = allPlayers.length > 0 ? allPlayers.reduce((a, b) => a.score > b.score ? a : b) : null;
 
   return (
     <div className="h-screen bg-[#0a0a0f] relative overflow-hidden">
