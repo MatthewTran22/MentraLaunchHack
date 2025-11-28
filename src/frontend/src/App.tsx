@@ -1,6 +1,8 @@
 import { useState, useEffect } from 'react';
 import { useMentraAuth } from '@mentra/react';
+import { BrowserRouter, Routes, Route } from 'react-router-dom';
 import Template from './pages/Template';
+import Leaderboard from './pages/Leaderboard';
 
 export default function App() {
   const { userId, isLoading, error, isAuthenticated } = useMentraAuth();
@@ -114,44 +116,51 @@ export default function App() {
   // }
 
   return (
-    <div className={`min-h-screen ${isDark ? 'dark' : 'light'}`} style={{
-      background: 'linear-gradient(to bottom right, var(--bg-primary), var(--bg-secondary), var(--bg-tertiary))'
-    }}>
-      {/* Animated background grid */}
-      <div className="fixed inset-0 pointer-events-none">
-        <div className="absolute inset-0 animate-grid-pulse" style={{
-          backgroundImage: `linear-gradient(var(--grid-color) 1px, transparent 1px), linear-gradient(90deg, var(--grid-color) 1px, transparent 1px)`,
-          backgroundSize: '50px 50px'
-        }}></div>
-      </div>
+    <BrowserRouter basename="/webview">
+      <Routes>
+        <Route path="/leaderboard" element={<Leaderboard />} />
+        <Route path="*" element={
+          <div className={`min-h-screen ${isDark ? 'dark' : 'light'}`} style={{
+            background: 'linear-gradient(to bottom right, var(--bg-primary), var(--bg-secondary), var(--bg-tertiary))'
+          }}>
+            {/* Animated background grid */}
+            <div className="fixed inset-0 pointer-events-none">
+              <div className="absolute inset-0 animate-grid-pulse" style={{
+                backgroundImage: `linear-gradient(var(--grid-color) 1px, transparent 1px), linear-gradient(90deg, var(--grid-color) 1px, transparent 1px)`,
+                backgroundSize: '50px 50px'
+              }}></div>
+            </div>
 
-      {/* Header */}
-      <header className="relative bg-transparent backdrop-blur-xl sticky top-0 z-50">
-        <div className="relative px-6 py-3 flex items-center justify-between">
-          {/* Logo */}
-          <div className="flex items-center gap-2">
-            <svg width="32" height="17" viewBox="0 0 726 387" fill="none" xmlns="http://www.w3.org/2000/svg">
-              <rect y="215" width="172" height="172" fill="#36C07D"/>
-              <path d="M136 0L446 215V387L136 172V0Z" fill="#36C07D"/>
-              <path d="M416 0L726 215V387L416 172V0Z" fill="#36C07D"/>
-            </svg>
-            <span className="font-bold text-lg" style={{ color: isDark ? '#f1f5f9' : 'var(--accent-emerald)' }}>Mentra</span>
+            {/* Header */}
+            <header className="relative bg-transparent backdrop-blur-xl sticky top-0 z-50">
+              <div className="relative px-6 py-3 flex items-center justify-between">
+                {/* Logo */}
+                <div className="flex items-center gap-2">
+                  <svg width="32" height="17" viewBox="0 0 726 387" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <rect y="215" width="172" height="172" fill="#36C07D"/>
+                    <path d="M136 0L446 215V387L136 172V0Z" fill="#36C07D"/>
+                    <path d="M416 0L726 215V387L416 172V0Z" fill="#36C07D"/>
+                  </svg>
+                  <span className="font-bold text-lg" style={{ color: isDark ? '#f1f5f9' : 'var(--accent-emerald)' }}>Mentra</span>
+                </div>
+
+                {/* User Info */}
+                <div className="flex items-center gap-2 px-3 py-1.5 bg-emerald-500/10 border border-emerald-500/20 rounded-lg">
+                  <div className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse"></div>
+                  <span className="text-xs text-emerald-400 font-mono">
+                    {userId?.substring(0, 8)}...
+                  </span>
+                </div>
+              </div>
+            </header>
+
+            {/* Content */}
+            <main>
+              <Template isDark={isDark} setIsDark={handleThemeChange} userId={userId || ''} />
+            </main>
           </div>
-
-          {/* User Info */}
-          <div className="flex items-center gap-2 px-3 py-1.5 bg-emerald-500/10 border border-emerald-500/20 rounded-lg">
-            <div className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse"></div>
-            <span className="text-xs text-emerald-400 font-mono">
-              {userId?.substring(0, 8)}...
-            </span>
-          </div>
-        </div>
-      </header>
-
-      {/* Content */}
-      <main>
-        <Template isDark={isDark} setIsDark={handleThemeChange} userId={userId || ''} />
-      </main>
-    </div>
+        } />
+      </Routes>
+    </BrowserRouter>
   );
 }
