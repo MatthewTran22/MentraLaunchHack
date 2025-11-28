@@ -5,11 +5,10 @@ import math
 import os
 import time
 import threading
+import socket
 from datetime import datetime
 from ultralytics import YOLO
 from shot_analyzer import analyze_shot
-from webrtc_client import create_video_capture
-import requests
 
 try:
     import pygame
@@ -18,14 +17,6 @@ try:
 except ImportError:
     print("Warning: pygame not installed. Sound disabled.")
     SOUND_ENABLED = False
-
-# WebRTC stream URL
-data = requests.get("https://gobbler-working-bluebird.ngrok-free.app/url").json()
-WEBRTC_PUBLISH_URL = data["webrtcUrl"]
-print(f"Using WebRTC URL: {WEBRTC_PUBLISH_URL}")
-WEBRTC_PLAY_URL = WEBRTC_PUBLISH_URL.replace("/webRTC/publish", "/webRTC/play")
-print(f"Using WebRTC PLAY URL: {WEBRTC_PLAY_URL}")
-WEBRTC_URL = WEBRTC_PLAY_URL
 
 # High-vis color ranges in HSV
 HIGHVIS_YELLOW_LOWER = np.array([20, 100, 100])
@@ -38,6 +29,17 @@ HIGHVIS_GREEN_LOWER = np.array([45, 100, 100])
 HIGHVIS_GREEN_UPPER = np.array([75, 255, 255])
 
 MIN_HIGHVIS_AREA = 500
+
+def get_local_ip():
+    """Get the local IP address of this machine"""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return "127.0.0.1"
 
 class FingerGunDetector:
     def __init__(self):
@@ -646,61 +648,53 @@ def main():
     # Initialize detector
     detector = FingerGunDetector()
 
-    # Try to connect to WebRTC stream
-    print(f"\nConnecting to WebRTC stream...")
+    # Get local IP and set up RTMP
+    local_ip = get_local_ip()
+    rtmp_port = 1935
+    rtmp_url = f"rtmp://{local_ip}:{rtmp_port}/live/stream"
+    
+    print(f"\n" + "=" * 50)
+    print(f"RTMP SERVER")
+    print(f"=" * 50)
+    print(f"Stream to: {rtmp_url}")
+    print(f"=" * 50)
+    print("\n*** Run MediaMTX first: mediamtx mediamtx.yml ***")
+    print("\nWaiting for RTMP stream...")
+    print("(Configure your camera now - will keep trying until connected)")
+    
+    # Set FFMPEG options for low latency (same as ffplay flags)
+    os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "fflags;nobuffer|flags;low_delay|framedrop;1|strict;experimental"
+    
+    # Keep trying to connect until stream is available
     cap = None
-    try:
-        cap = create_video_capture(WEBRTC_URL, max_retries=3, retry_delay=2)
-    except Exception as e:
-        print(f"WebRTC error: {e}")
-
-    # Fallback to local webcam if WebRTC fails
-    if cap is None:
-        print("\nWebRTC connection failed. Falling back to local webcam...")
-        cap = cv2.VideoCapture(0)
-
-        if not cap.isOpened():
-            print("Error: Could not open local webcam either")
-            print("Make sure your camera is connected and recognized")
-            return
-        else:
-            print("Connected to local webcam!")
-
-    # Track connection state for reconnection
-    consecutive_failures = 0
-    max_consecutive_failures = 30
+    while cap is None:
+        # Use FFMPEG backend explicitly with low-latency options
+        cap = cv2.VideoCapture(rtmp_url, cv2.CAP_FFMPEG)
+        
+        if cap.isOpened():
+            # Set additional buffer properties
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            
+            ret, test_frame = cap.read()
+            if ret and test_frame is not None:
+                print(f"\n✓ Connected to RTMP stream!")
+                break
+            else:
+                cap.release()
+                cap = None
+        
+        print(".", end="", flush=True)
+        time.sleep(2)
+    
+    print("\nProcessing frames...")
 
     while True:
         ret, frame = cap.read()
 
         if not ret or frame is None:
-            consecutive_failures += 1
-
-            if consecutive_failures >= max_consecutive_failures:
-                print("\nConnection lost. Attempting to reconnect...")
-                cap.release()
-
-                # Try WebRTC first, then fallback
-                try:
-                    cap = create_video_capture(WEBRTC_URL, max_retries=2, retry_delay=1)
-                except Exception as e:
-                    print(f"WebRTC reconnect error: {e}")
-                    cap = None
-
-                if cap is None:
-                    print("Trying local webcam...")
-                    cap = cv2.VideoCapture(0)
-                    if not cap.isOpened():
-                        print("Error: Could not reconnect to any video source")
-                        break
-
-                consecutive_failures = 0
-
-            time.sleep(0.01)
+            print("Warning: Failed to read frame, retrying...")
+            time.sleep(0.1)
             continue
-
-        # Reset failure counter on successful frame
-        consecutive_failures = 0
 
         # Process frame
         processed_frame, shot_fired = detector.process_frame(frame)
