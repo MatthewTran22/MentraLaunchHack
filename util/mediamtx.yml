@@ -1,0 +1,18 @@
+# MediaMTX configuration for RTMP streaming
+# Run with: mediamtx mediamtx.yml
+
+logLevel: info
+
+# RTMP server on port 1935
+rtmp: yes
+rtmpAddress: :1935
+
+# Disable other protocols
+rtsp: no
+webrtc: no
+hls: no
+srt: no
+
+# Allow all paths with no auth
+paths:
+  all:
