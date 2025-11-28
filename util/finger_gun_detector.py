@@ -3,9 +3,25 @@ import mediapipe as mp
 import numpy as np
 import math
 import os
+import time
+import threading
 from datetime import datetime
 from ultralytics import YOLO
 from shot_analyzer import analyze_shot
+from webrtc_client import create_video_capture
+
+try:
+    import pygame
+    pygame.mixer.init()
+    SOUND_ENABLED = True
+except ImportError:
+    print("Warning: pygame not installed. Sound disabled.")
+    SOUND_ENABLED = False
+
+# WebRTC stream URL
+WEBRTC_PUBLISH_URL = "https://customer-zslwzsqjf4ht8vy9.cloudflarestream.com/ec6905680b6cdc4c6a5f3cdd2f285a54kec573507c5b74ce49b110bae2c75b8a6/webRTC/publish"
+WEBRTC_PLAY_URL = "https://customer-zslwzsqjf4ht8vy9.cloudflarestream.com/ec6905680b6cdc4c6a5f3cdd2f285a54kec573507c5b74ce49b110bae2c75b8a6/webRTC/play"
+WEBRTC_URL = WEBRTC_PLAY_URL
 
 # High-vis color ranges in HSV
 HIGHVIS_YELLOW_LOWER = np.array([20, 100, 100])
@@ -48,6 +64,62 @@ class FingerGunDetector:
         # Team counts
         self.highvis_count = 0
         self.regular_count = 0
+
+        # Kill streak tracking
+        self.kill_streak = 0
+
+        # Load sounds
+        self.sounds = {}
+        if SOUND_ENABLED:
+            self._load_sounds()
+
+    def _load_sounds(self):
+        """Load kill streak sound files"""
+        sounds_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'sounds')
+
+        sound_files = {
+            'kill1': 'kill1.mp3',
+            'kill2': 'kill2.mp3',
+            'kill3': 'kill3.mp3',
+            'kill4': 'kill4.mp3',
+            'kill5': 'kill5.mp3',
+            'ace': 'ace.mp3'
+        }
+
+        for name, filename in sound_files.items():
+            filepath = os.path.join(sounds_dir, filename)
+            if os.path.exists(filepath):
+                try:
+                    self.sounds[name] = pygame.mixer.Sound(filepath)
+                    print(f"Loaded sound: {filename}")
+                except Exception as e:
+                    print(f"Error loading {filename}: {e}")
+            else:
+                print(f"Sound file not found: {filepath}")
+
+    def play_kill_sound(self):
+        """Play appropriate kill sound based on streak"""
+        if not SOUND_ENABLED or not self.sounds:
+            return
+
+        if self.kill_streak >= 5:
+            sound_key = 'ace'
+        else:
+            sound_key = f'kill{self.kill_streak}'
+
+        if sound_key in self.sounds:
+            # Play sound in separate thread to avoid blocking
+            threading.Thread(target=self.sounds[sound_key].play, daemon=True).start()
+            print(f"Playing: {sound_key} (streak: {self.kill_streak})")
+
+    def on_hit(self, is_valid_hit):
+        """Handle hit result and update streak"""
+        if is_valid_hit:
+            self.kill_streak += 1
+            self.play_kill_sound()
+        else:
+            # Reset streak on miss or friendly fire
+            self.kill_streak = 0
 
     def is_finger_extended(self, landmarks, finger_tip_id, finger_pip_id):
         tip = landmarks[finger_tip_id]
@@ -523,15 +595,14 @@ class FingerGunDetector:
                     hand_bbox = self.get_hand_bbox(hand_landmarks, frame.shape)
                     # Save the shot image and analyze it
                     filepath, hand_bbox = self.save_shot(frame, hand_bbox)
-                    analyze_shot(filepath, hand_bbox)
+                    is_valid_hit = analyze_shot(filepath, hand_bbox)
+                    # Handle hit and play sound
+                    self.on_hit(is_valid_hit)
                     # Draw shot effect
                     self.draw_shot_effect(frame, tip_x, tip_y, dx, dy)
                     cv2.putText(frame, "BANG!", (10, 30),
                                cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 0, 255), 4)
                 else:
-                    # Draw aiming vector
-                    self.draw_vector(frame, tip_x, tip_y, dx, dy)
-
                     # Show cocked status with POV-friendly text
                     if hand_id in self.is_cocked and self.is_cocked[hand_id]:
                         cv2.putText(frame, "READY", (10, 60),
@@ -544,6 +615,19 @@ class FingerGunDetector:
 
     def release(self):
         self.hands.close()
+        self._clear_shots_directory()
+
+    def _clear_shots_directory(self):
+        """Clear all images from the shots directory on shutdown"""
+        if os.path.exists(self.shots_dir):
+            for filename in os.listdir(self.shots_dir):
+                filepath = os.path.join(self.shots_dir, filename)
+                try:
+                    if os.path.isfile(filepath):
+                        os.remove(filepath)
+                except Exception as e:
+                    print(f"Error deleting {filepath}: {e}")
+            print("Shots directory cleared.")
 
 def main():
     print("=" * 50)
@@ -558,19 +642,61 @@ def main():
     # Initialize detector
     detector = FingerGunDetector()
 
-    # Open webcam
-    cap = cv2.VideoCapture(0)
+    # Try to connect to WebRTC stream
+    print(f"\nConnecting to WebRTC stream...")
+    cap = None
+    try:
+        cap = create_video_capture(WEBRTC_URL, max_retries=3, retry_delay=2)
+    except Exception as e:
+        print(f"WebRTC error: {e}")
 
-    if not cap.isOpened():
-        print("Error: Could not open camera")
-        print("Make sure your camera is connected and recognized")
-        return
+    # Fallback to local webcam if WebRTC fails
+    if cap is None:
+        print("\nWebRTC connection failed. Falling back to local webcam...")
+        cap = cv2.VideoCapture(0)
+
+        if not cap.isOpened():
+            print("Error: Could not open local webcam either")
+            print("Make sure your camera is connected and recognized")
+            return
+        else:
+            print("Connected to local webcam!")
+
+    # Track connection state for reconnection
+    consecutive_failures = 0
+    max_consecutive_failures = 30
 
     while True:
         ret, frame = cap.read()
-        if not ret:
-            print("Error: Failed to capture frame")
-            break
+
+        if not ret or frame is None:
+            consecutive_failures += 1
+
+            if consecutive_failures >= max_consecutive_failures:
+                print("\nConnection lost. Attempting to reconnect...")
+                cap.release()
+
+                # Try WebRTC first, then fallback
+                try:
+                    cap = create_video_capture(WEBRTC_URL, max_retries=2, retry_delay=1)
+                except Exception as e:
+                    print(f"WebRTC reconnect error: {e}")
+                    cap = None
+
+                if cap is None:
+                    print("Trying local webcam...")
+                    cap = cv2.VideoCapture(0)
+                    if not cap.isOpened():
+                        print("Error: Could not reconnect to any video source")
+                        break
+
+                consecutive_failures = 0
+
+            time.sleep(0.01)
+            continue
+
+        # Reset failure counter on successful frame
+        consecutive_failures = 0
 
         # Process frame
         processed_frame, shot_fired = detector.process_frame(frame)
@@ -579,6 +705,12 @@ def main():
         h, w = processed_frame.shape[:2]
         cv2.putText(processed_frame, f"High-Vis: {detector.highvis_count} | Regular: {detector.regular_count}",
                    (w - 350, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+
+        # Draw kill streak
+        if detector.kill_streak > 0:
+            streak_text = f"Streak: {detector.kill_streak}" + (" ACE!" if detector.kill_streak >= 5 else "")
+            cv2.putText(processed_frame, streak_text, (10, h - 20),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
 
         # Display frame
         cv2.imshow('Finger Gun Game', processed_frame)
