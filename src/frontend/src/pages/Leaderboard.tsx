@@ -86,7 +86,11 @@ export default function Leaderboard() {
   const fetchLeaderboard = useCallback(async () => {
     try {
       setError(null);
-      const response = await fetch('http://localhost:7777/api/leaderboard');
+      const response = await fetch('https://gobbler-working-bluebird.ngrok-free.app/api/leaderboard', {
+        headers: new Headers({
+          "ngrok-skip-browser-warning": "true", // The value can be anything, but "true" is common
+        }),
+      });
       if (!response.ok) {
         throw new Error(`Failed to fetch leaderboard: ${response.statusText}`);
       }
