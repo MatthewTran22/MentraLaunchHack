@@ -1,4 +1,5 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
+import Hls from 'hls.js';
 
 interface HitCount {
   target_id: number;
@@ -43,6 +44,140 @@ interface StreamSlot {
   streamUrl: string;
   isLive: boolean;
   playerUsername?: string;
+}
+
+// Helper function to convert RTMP URL to HLS URL
+// Most RTMP servers (nginx-rtmp, MediaMTX, etc.) serve HLS on the same path
+function rtmpToHls(rtmpUrl: string, playerUsername?: string): string {
+  if (!rtmpUrl) return '';
+  
+  // If it's already an HLS URL, return as-is
+  if (rtmpUrl.includes('.m3u8') || rtmpUrl.startsWith('http')) {
+    return rtmpUrl;
+  }
+  
+  // Convert rtmp://host:port/app/stream to http://host:port/app/stream.m3u8
+  try {
+    const url = new URL(rtmpUrl.replace('rtmp://', 'http://'));
+    const host = url.hostname;
+    const path = url.pathname;
+    
+    const streamName = path.split('/').pop() || 'stream';
+    const appName = path.split('/').filter(Boolean)[0] || 'live';
+    
+    // Assign port based on player username
+    // Kevin = 8888, Phil = 8889
+    let port = '8888'; // default
+    if (playerUsername?.toLowerCase() === 'phil') {
+      port = '8889';
+    } else if (playerUsername?.toLowerCase() === 'kevin') {
+      port = '8888';
+    }
+    
+    return `http://${host}:${port}/${appName}/${streamName}/index.m3u8`;
+  } catch {
+    return rtmpUrl;
+  }
+}
+
+// Stream Player Component that handles HLS
+function StreamPlayer({ streamUrl, playerUsername }: { streamUrl: string; isLive?: boolean; playerUsername?: string }) {
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const hlsRef = useRef<Hls | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [trying, setTrying] = useState(false);
+
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video || !streamUrl) return;
+
+    const hlsUrl = rtmpToHls(streamUrl, playerUsername);
+    console.log('Attempting to play stream:', { original: streamUrl, hlsUrl, player: playerUsername });
+    setError(null);
+    setTrying(true);
+
+    // Cleanup previous instance
+    if (hlsRef.current) {
+      hlsRef.current.destroy();
+      hlsRef.current = null;
+    }
+
+    if (Hls.isSupported()) {
+      const hls = new Hls({
+        enableWorker: true,
+        lowLatencyMode: true,
+        backBufferLength: 90,
+      });
+      
+      hlsRef.current = hls;
+      
+      hls.on(Hls.Events.ERROR, (_, data) => {
+        console.error('HLS Error:', data);
+        if (data.fatal) {
+          setError(`Stream error: ${data.type}`);
+          setTrying(false);
+        }
+      });
+
+      hls.on(Hls.Events.MANIFEST_PARSED, () => {
+        console.log('HLS manifest parsed, starting playback');
+        setTrying(false);
+        video.play().catch(e => console.log('Autoplay prevented:', e));
+      });
+
+      hls.loadSource(hlsUrl);
+      hls.attachMedia(video);
+    } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+      // Native HLS support (Safari)
+      video.src = hlsUrl;
+      video.addEventListener('loadedmetadata', () => {
+        setTrying(false);
+        video.play().catch(e => console.log('Autoplay prevented:', e));
+      });
+      video.addEventListener('error', () => {
+        setError('Failed to load stream');
+        setTrying(false);
+      });
+    } else {
+      setError('HLS not supported');
+      setTrying(false);
+    }
+
+    return () => {
+      if (hlsRef.current) {
+        hlsRef.current.destroy();
+        hlsRef.current = null;
+      }
+    };
+  }, [streamUrl]);
+
+  return (
+    <div className="relative w-full h-full">
+      <video
+        ref={videoRef}
+        autoPlay
+        muted
+        playsInline
+        className="w-full h-full object-contain bg-black"
+      />
+      {trying && (
+        <div className="absolute inset-0 flex items-center justify-center bg-black/70">
+          <div className="flex flex-col items-center gap-2">
+            <div className="w-8 h-8 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+            <span className="text-white/60 text-xs">Connecting...</span>
+          </div>
+        </div>
+      )}
+      {error && (
+        <div className="absolute inset-0 flex items-center justify-center bg-black/70">
+          <div className="flex flex-col items-center gap-2 text-center px-4">
+            <span className="text-red-400 text-xs">{error}</span>
+            <span className="text-white/40 text-[10px]">RTMP: {streamUrl}</span>
+          </div>
+        </div>
+      )}
+    </div>
+  );
 }
 
 // Team color mappings - sports broadcast style
@@ -101,8 +236,6 @@ export default function Leaderboard() {
   const [streams, setStreams] = useState<StreamSlot[]>([
     { id: 1, label: 'CAM 01', streamUrl: '', isLive: false },
     { id: 2, label: 'CAM 02', streamUrl: '', isLive: false },
-    { id: 3, label: 'CAM 03', streamUrl: '', isLive: false },
-    { id: 4, label: 'CAM 04', streamUrl: '', isLive: false },
   ]);
 
   const fetchLeaderboard = useCallback(async () => {
@@ -173,7 +306,7 @@ export default function Leaderboard() {
       const allPlayers = mappedTeams.flatMap(team => team.players);
       const playersWithStreams = allPlayers.filter(p => p.stream_url);
       
-      const streamLabels = ['CAM 01', 'CAM 02', 'CAM 03', 'CAM 04'];
+      const streamLabels = ['CAM 01', 'CAM 02'];
       const updatedStreams: StreamSlot[] = streamLabels.map((label, index) => {
         const player = playersWithStreams[index];
         return {
@@ -251,35 +384,41 @@ export default function Leaderboard() {
         
         {/* Top broadcast bar */}
         <div 
-          className={`w-full bg-gradient-to-r from-red-600/90 via-red-500/90 to-red-600/90 py-1 transition-all duration-500 shrink-0 ${
+          className={`w-full bg-white py-2 transition-all duration-500 shrink-0 ${
             mounted ? 'translate-y-0 opacity-100' : '-translate-y-full opacity-0'
           }`}
-          style={{ backdropFilter: 'blur(10px)' }}
+          style={{ boxShadow: '0 2px 10px rgba(0,0,0,0.3)' }}
         >
           <div className="flex items-center justify-center gap-4 px-4">
-            <div className="flex items-center gap-2">
-              <div className="w-2 h-2 bg-white rounded-full animate-pulse" />
-              <span className="text-white text-sm font-bold tracking-wider uppercase">LIVE</span>
+            <h1 
+              className="text-2xl font-black tracking-wider uppercase"
+              style={{ 
+                fontFamily: "'Bebas Neue', sans-serif",
+                color: '#0a0a0f',
+                letterSpacing: '0.1em',
+              }}
+            >
+              View Pew
+            </h1>
+            <div className="flex items-center gap-2 ml-4">
+              <div className="w-2 h-2 bg-red-500 rounded-full animate-pulse" />
+              <span className="text-red-500 text-xs font-bold tracking-wider uppercase">LIVE</span>
             </div>
-            <div className="h-4 w-px bg-white/30" />
-            <span className="text-white/90 text-sm font-medium tracking-wide">View Pew</span>
-            <div className="h-4 w-px bg-white/30" />
-            <span className="text-white/70 text-xs tracking-wider">MENTRA ARENA</span>
           </div>
         </div>
 
         {/* Main content area */}
         <div className="flex-1 flex flex-col px-3 py-2 min-h-0">
           
-          {/* Camera Streams Section - NOW AT TOP */}
+          {/* Camera Streams Section - Centered vertically */}
           <div 
-            className={`w-full max-w-6xl mx-auto transition-all duration-700 flex-1 min-h-0 ${
+            className={`w-full max-w-7xl mx-auto transition-all duration-700 flex-1 min-h-0 flex items-center justify-center ${
               mounted ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-8'
             }`}
             style={{ transitionDelay: '200ms' }}
           >
-            {/* Stream grid - 2x2 layout */}
-            <div className="grid grid-cols-2 gap-2 h-full">
+            {/* Stream grid - 2 streams side by side with 16:9 aspect ratio */}
+            <div className="grid grid-cols-2 gap-4 w-full max-h-full" style={{ alignContent: 'center' }}>
               {streams.map((stream, index) => (
                 <div
                   key={stream.id}
@@ -291,42 +430,43 @@ export default function Leaderboard() {
                     background: 'linear-gradient(135deg, rgba(20,20,25,0.9) 0%, rgba(10,10,15,0.95) 100%)',
                     border: stream.isLive ? '2px solid rgba(239, 68, 68, 0.3)' : '1px solid rgba(255,255,255,0.08)',
                     boxShadow: stream.isLive ? '0 0 30px rgba(239, 68, 68, 0.1)' : 'none',
+                    aspectRatio: '16 / 9',
                   }}
                 >
                   {/* Stream content or placeholder */}
                   {stream.streamUrl ? (
-                    <video
-                      src={stream.streamUrl}
-                      autoPlay
-                      muted
-                      playsInline
-                      className="w-full h-full object-cover"
-                    />
+                    <StreamPlayer streamUrl={stream.streamUrl} isLive={stream.isLive} playerUsername={stream.playerUsername} />
                   ) : (
-                    <div className="absolute inset-0 flex flex-col items-center justify-center">
+                    <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/50">
                       {/* Camera icon */}
                       <div 
-                        className="w-10 h-10 rounded-full flex items-center justify-center mb-1 transition-all duration-300 group-hover:scale-110"
+                        className="w-16 h-16 rounded-full flex items-center justify-center mb-3 transition-all duration-300 group-hover:scale-110"
                         style={{
-                          background: 'rgba(255, 255, 255, 0.03)',
-                          border: '1px solid rgba(255, 255, 255, 0.08)',
+                          background: 'rgba(255, 255, 255, 0.05)',
+                          border: '2px solid rgba(255, 255, 255, 0.1)',
                         }}
                       >
                         <svg 
-                          width="16" 
-                          height="16" 
+                          width="28" 
+                          height="28" 
                           viewBox="0 0 24 24" 
                           fill="none" 
                           stroke="currentColor" 
                           strokeWidth="1.5"
-                          style={{ color: 'rgba(100, 100, 100, 0.6)' }}
+                          style={{ color: 'rgba(150, 150, 150, 0.6)' }}
                         >
                           <path d="M23 7l-7 5 7 5V7z" />
                           <rect x="1" y="5" width="15" height="14" rx="2" ry="2" />
                         </svg>
                       </div>
                       <span 
-                        className="text-[10px] tracking-widest uppercase font-medium"
+                        className="text-sm tracking-widest uppercase font-medium mb-1"
+                        style={{ color: 'rgba(120, 120, 120, 0.9)' }}
+                      >
+                        {stream.label}
+                      </span>
+                      <span 
+                        className="text-xs tracking-wider uppercase"
                         style={{ color: 'rgba(80, 80, 80, 0.8)' }}
                       >
                         Awaiting Signal
