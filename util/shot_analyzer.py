@@ -55,26 +55,29 @@ class ShotAnalyzer:
 
         return False
 
-    def detect_highvis_regions(self, frame):
-        """Detect regions with high-visibility colors."""
+    def detect_color_masks(self, frame):
+        """Detect regions with specific high-visibility colors."""
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
 
         mask_yellow = cv2.inRange(hsv, HIGHVIS_YELLOW_LOWER, HIGHVIS_YELLOW_UPPER)
-        mask_orange = cv2.inRange(hsv, HIGHVIS_ORANGE_LOWER, HIGHVIS_ORANGE_UPPER)
         mask_green = cv2.inRange(hsv, HIGHVIS_GREEN_LOWER, HIGHVIS_GREEN_UPPER)
 
-        combined_mask = cv2.bitwise_or(mask_yellow, mask_orange)
-        combined_mask = cv2.bitwise_or(combined_mask, mask_green)
-
         kernel = np.ones((5, 5), np.uint8)
-        combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_OPEN, kernel)
-        combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_CLOSE, kernel)
-        combined_mask = cv2.dilate(combined_mask, kernel, iterations=2)
 
-        return combined_mask
+        # Process yellow mask
+        mask_yellow = cv2.morphologyEx(mask_yellow, cv2.MORPH_OPEN, kernel)
+        mask_yellow = cv2.morphologyEx(mask_yellow, cv2.MORPH_CLOSE, kernel)
+        mask_yellow = cv2.dilate(mask_yellow, kernel, iterations=2)
 
-    def classify_person_team(self, frame, x1, y1, x2, y2, highvis_mask):
-        """Classify if a person is wearing high-vis or not."""
+        # Process green mask
+        mask_green = cv2.morphologyEx(mask_green, cv2.MORPH_OPEN, kernel)
+        mask_green = cv2.morphologyEx(mask_green, cv2.MORPH_CLOSE, kernel)
+        mask_green = cv2.dilate(mask_green, kernel, iterations=2)
+
+        return mask_yellow, mask_green
+
+    def classify_person_team(self, frame, x1, y1, x2, y2, mask_yellow, mask_green):
+        """Classify what color team a person is on: yellow, green, or none."""
         w, h = x2 - x1, y2 - y1
 
         upper_y = y1 + int(h * 0.15)
@@ -85,18 +88,32 @@ class ShotAnalyzer:
         end_y = min(frame.shape[0], upper_y + upper_h)
         end_x = min(frame.shape[1], x2)
 
-        roi_mask = highvis_mask[upper_y:end_y, upper_x:end_x]
+        roi_yellow = mask_yellow[upper_y:end_y, upper_x:end_x]
+        roi_green = mask_green[upper_y:end_y, upper_x:end_x]
 
-        if roi_mask.size == 0:
-            return "regular"
+        if roi_yellow.size == 0:
+            return None
 
-        highvis_pixels = cv2.countNonZero(roi_mask)
-        total_pixels = roi_mask.size
-        percentage = (highvis_pixels / total_pixels) * 100
+        yellow_pixels = cv2.countNonZero(roi_yellow)
+        green_pixels = cv2.countNonZero(roi_green)
+        total_pixels = roi_yellow.size
 
-        is_highvis = percentage > 3 and highvis_pixels > MIN_HIGHVIS_AREA
+        yellow_pct = (yellow_pixels / total_pixels) * 100
+        green_pct = (green_pixels / total_pixels) * 100
 
-        return "highvis" if is_highvis else "regular"
+        # Check if enough pixels to count as wearing that color
+        yellow_valid = yellow_pct > 3 and yellow_pixels > MIN_HIGHVIS_AREA
+        green_valid = green_pct > 3 and green_pixels > MIN_HIGHVIS_AREA
+
+        if yellow_valid and green_valid:
+            # Both detected, pick the stronger one
+            return "yellow" if yellow_pixels > green_pixels else "green"
+        elif yellow_valid:
+            return "yellow"
+        elif green_valid:
+            return "green"
+        else:
+            return None
 
     def send_hit_to_api(self):
         """Send hit data to the API endpoint."""
@@ -118,19 +135,17 @@ class ShotAnalyzer:
 
     def is_valid_hit(self, image_path, hand_bbox=None):
         """
-        Analyze a shot image to check if the crosshair hit an opponent.
+        Analyze a shot image to check if the crosshair hit the target team.
 
-        User is on REGULAR team, so:
-        - Hit HIGH-VIS player = True (valid hit, different team)
-        - Hit REGULAR player = False (friendly fire, same team)
-        - Miss = False
+        Player 1 (Phil) targets yellow team
+        Player 2 (Kevin) targets green team
 
         Args:
             image_path: Path to the saved shot image
             hand_bbox: (x1, y1, x2, y2) bounding box of the FPV hand to exclude
 
         Returns:
-            bool: True if hit an opponent, False if miss or friendly fire
+            bool: True if hit target team, False if miss or wrong team
         """
         frame = cv2.imread(image_path)
         if frame is None:
@@ -140,8 +155,8 @@ class ShotAnalyzer:
         h, w, _ = frame.shape
         center_x, center_y = w // 2, h // 2
 
-        # Get high-vis mask for team classification
-        highvis_mask = self.detect_highvis_regions(frame)
+        # Get color masks for team classification
+        mask_yellow, mask_green = self.detect_color_masks(frame)
 
         # Detect persons in the image
         results = self.yolo(frame, classes=[0], verbose=False)
@@ -158,17 +173,21 @@ class ShotAnalyzer:
 
                 # Check if crosshair is within bounding box
                 if x1 <= center_x <= x2 and y1 <= center_y <= y2:
-                    # Classify the person's team
-                    target_team = self.classify_person_team(frame, x1, y1, x2, y2, highvis_mask)
+                    # Classify the person's team color
+                    person_team = self.classify_person_team(frame, x1, y1, x2, y2, mask_yellow, mask_green)
 
-                    # Valid hit only if target is on different team
-                    if target_team != USER_TEAM:
-                        print(f"HIT: True (hit {target_team.upper()} - opponent)")
+                    # No high-vis color detected = green team
+                    if person_team is None:
+                        person_team = "green"
+
+                    # Valid hit only if person is wearing our target team's color
+                    if person_team == self.target_team:
+                        print(f"HIT: True ({self.username} hit {person_team.upper()} team - valid target!)")
                         # Send hit to API
                         self.send_hit_to_api()
                         return True
                     else:
-                        print(f"HIT: False (friendly fire - same team: {target_team.upper()})")
+                        print(f"HIT: False ({self.username} hit {person_team.upper()} - wrong team, target is {self.target_team.upper()})")
                         return False
 
         print("HIT: False (missed)")

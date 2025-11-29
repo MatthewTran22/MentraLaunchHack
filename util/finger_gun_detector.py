@@ -69,8 +69,8 @@ class FingerGunDetector:
         self.cooldown_frames = 10
 
         # Team counts
-        self.highvis_count = 0
-        self.regular_count = 0
+        self.yellow_count = 0
+        self.green_count = 0
 
         # Kill streak tracking
         self.kill_streak = 0
@@ -85,6 +85,7 @@ class FingerGunDetector:
         sounds_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'sounds')
 
         sound_files = {
+            'pew': 'pew.mp3',
             'kill1': 'kill1.mp3',
             'kill2': 'kill2.mp3',
             'kill3': 'kill3.mp3',
@@ -103,6 +104,12 @@ class FingerGunDetector:
                     print(f"Error loading {filename}: {e}")
             else:
                 print(f"Sound file not found: {filepath}")
+
+    def play_pew_sound(self):
+        """Play pew sound when shooting"""
+        if not SOUND_ENABLED or 'pew' not in self.sounds:
+            return
+        threading.Thread(target=self.sounds['pew'].play, daemon=True).start()
 
     def play_kill_sound(self):
         """Play appropriate kill sound based on streak"""
@@ -393,60 +400,77 @@ class FingerGunDetector:
             return True
         return False
 
-    def detect_highvis_regions(self, frame):
-        """Detect regions with high-visibility colors."""
+    def detect_color_masks(self, frame):
+        """Detect regions with yellow and green colors separately."""
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
 
         mask_yellow = cv2.inRange(hsv, HIGHVIS_YELLOW_LOWER, HIGHVIS_YELLOW_UPPER)
-        mask_orange = cv2.inRange(hsv, HIGHVIS_ORANGE_LOWER, HIGHVIS_ORANGE_UPPER)
         mask_green = cv2.inRange(hsv, HIGHVIS_GREEN_LOWER, HIGHVIS_GREEN_UPPER)
 
-        combined_mask = cv2.bitwise_or(mask_yellow, mask_orange)
-        combined_mask = cv2.bitwise_or(combined_mask, mask_green)
-
         kernel = np.ones((5, 5), np.uint8)
-        combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_OPEN, kernel)
-        combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_CLOSE, kernel)
-        combined_mask = cv2.dilate(combined_mask, kernel, iterations=2)
 
-        return combined_mask
+        # Process yellow mask
+        mask_yellow = cv2.morphologyEx(mask_yellow, cv2.MORPH_OPEN, kernel)
+        mask_yellow = cv2.morphologyEx(mask_yellow, cv2.MORPH_CLOSE, kernel)
+        mask_yellow = cv2.dilate(mask_yellow, kernel, iterations=2)
 
-    def classify_person_team(self, frame, x, y, w, h, highvis_mask):
-        """Classify if a person is wearing high-vis or not."""
+        # Process green mask
+        mask_green = cv2.morphologyEx(mask_green, cv2.MORPH_OPEN, kernel)
+        mask_green = cv2.morphologyEx(mask_green, cv2.MORPH_CLOSE, kernel)
+        mask_green = cv2.dilate(mask_green, kernel, iterations=2)
+
+        return mask_yellow, mask_green
+
+    def classify_person_team(self, frame, x1, y1, x2, y2, mask_yellow, mask_green):
+        """Classify what color team a person is on: yellow, green, or None."""
+        w, h = x2 - x1, y2 - y1
+
         # Focus on upper body / torso area (where vest would be)
-        upper_y = y + int(h * 0.15)
+        upper_y = y1 + int(h * 0.15)
         upper_h = int(h * 0.45)
 
         upper_y = max(0, upper_y)
-        upper_x = max(0, x)
+        upper_x = max(0, x1)
         end_y = min(frame.shape[0], upper_y + upper_h)
-        end_x = min(frame.shape[1], x + w)
+        end_x = min(frame.shape[1], x2)
 
-        roi_mask = highvis_mask[upper_y:end_y, upper_x:end_x]
+        roi_yellow = mask_yellow[upper_y:end_y, upper_x:end_x]
+        roi_green = mask_green[upper_y:end_y, upper_x:end_x]
 
-        if roi_mask.size == 0:
-            return False, 0
+        if roi_yellow.size == 0:
+            return None
 
-        highvis_pixels = cv2.countNonZero(roi_mask)
-        total_pixels = roi_mask.size
-        percentage = (highvis_pixels / total_pixels) * 100
+        yellow_pixels = cv2.countNonZero(roi_yellow)
+        green_pixels = cv2.countNonZero(roi_green)
+        total_pixels = roi_yellow.size
 
-        is_highvis = percentage > 3 and highvis_pixels > MIN_HIGHVIS_AREA
+        yellow_pct = (yellow_pixels / total_pixels) * 100
+        green_pct = (green_pixels / total_pixels) * 100
 
-        return is_highvis, percentage
+        yellow_valid = yellow_pct > 3 and yellow_pixels > MIN_HIGHVIS_AREA
+        green_valid = green_pct > 3 and green_pixels > MIN_HIGHVIS_AREA
+
+        if yellow_valid and green_valid:
+            return "yellow" if yellow_pixels > green_pixels else "green"
+        elif yellow_valid:
+            return "yellow"
+        elif green_valid:
+            return "green"
+        else:
+            return None
 
     def detect_and_draw_person(self, frame, hand_bboxes):
-        """Detect person using YOLOv8n and draw bounding box with team classification, excluding hands"""
+        """Detect person using YOLOv8n and draw bounding box only for yellow/green team members"""
         # Run YOLO inference (class 0 = person)
         results = self.yolo(frame, classes=[0], verbose=False)
         person_boxes = []
 
-        # Get high-vis mask for team classification
-        highvis_mask = self.detect_highvis_regions(frame)
+        # Get color masks for team classification
+        mask_yellow, mask_green = self.detect_color_masks(frame)
 
         # Reset counts
-        self.highvis_count = 0
-        self.regular_count = 0
+        self.yellow_count = 0
+        self.green_count = 0
 
         for result in results:
             boxes = result.boxes
@@ -468,19 +492,23 @@ class FingerGunDetector:
                     continue
 
                 # Classify team
-                is_highvis, hv_percentage = self.classify_person_team(frame, x1, y1, w, h, highvis_mask)
+                team = self.classify_person_team(frame, x1, y1, x2, y2, mask_yellow, mask_green)
 
-                if is_highvis:
-                    color = (0, 255, 0)  # Green for high-vis
-                    label = "HIGH-VIS"
-                    self.highvis_count += 1
-                else:
-                    color = (255, 100, 0)  # Blue for regular
-                    label = "REGULAR"
-                    self.regular_count += 1
+                # No color detected = green team
+                if team is None:
+                    team = "green"
+
+                if team == "yellow":
+                    color = (0, 255, 255)  # Yellow in BGR
+                    label = "YELLOW"
+                    self.yellow_count += 1
+                else:  # green
+                    color = (0, 255, 0)  # Green in BGR
+                    label = "GREEN"
+                    self.green_count += 1
 
                 # Store bounding box with team info
-                person_boxes.append((x1, y1, x2, y2, is_highvis))
+                person_boxes.append((x1, y1, x2, y2, team))
 
                 # Draw bounding box
                 cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
@@ -501,7 +529,7 @@ class FingerGunDetector:
                 label_size, _ = cv2.getTextSize(label_text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
                 cv2.rectangle(frame, (x1, y1 - 25), (x1 + label_size[0] + 10, y1), color, -1)
                 cv2.putText(frame, label_text, (x1 + 5, y1 - 7),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
 
         return person_boxes
 
@@ -598,6 +626,8 @@ class FingerGunDetector:
 
                 if is_shot:
                     shot_fired = True
+                    # Play pew sound
+                    self.play_pew_sound()
                     # Get hand bounding box to exclude from person detection
                     hand_bbox = self.get_hand_bbox(hand_landmarks, frame.shape)
                     # Save the shot image and analyze it
@@ -712,8 +742,8 @@ def main():
 
         # Draw team count on screen
         h, w = processed_frame.shape[:2]
-        cv2.putText(processed_frame, f"High-Vis: {detector.highvis_count} | Regular: {detector.regular_count}",
-                   (w - 350, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        cv2.putText(processed_frame, f"Yellow: {detector.yellow_count} | Green: {detector.green_count}",
+                   (w - 300, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
 
         # Draw kill streak
         if detector.kill_streak > 0:
