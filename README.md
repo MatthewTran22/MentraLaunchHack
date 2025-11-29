@@ -1,3 +1,69 @@
+# View Pew
+
+Smart Glasses Laser Tag
+
+https://x.com/caydengineer/status/1994585871820230984?s=20
+
+## Run instructions
+
+1. Run the scorekeeping API on port 8000:
+
+```
+uv sync
+source .venv/bin/activate
+uvicorn src.backend.main:app
+```
+
+2. Run the Mentra glasses streaming backend on port 3000:
+
+(Follow the original README instructions below to get the app running on MentraOS first)
+
+
+```
+bun install
+bun run dev
+```
+
+This also starts the leaderboard at http://localhost:5173/webview/leaderboard
+
+3. Run nginx on your computer with the config at nginx.conf:
+
+This splits your 7777 port into the backend (localhost:7777 -> 3000) and 8000 for the api (localhost:7777/api -> 8000),
+and it's only due to limitations of using one ngrok plan.
+
+
+```
+sudo nginx -s reload -c $(pwd)/nginx.conf
+```
+
+Update anywhere where there's an ngrok URL to your URL. Verify you can hit
+localhost:7777 and localhost:7777/api/docs
+
+
+4. Start the computer vision/shot detection backend.
+This receives the RTMP stream from the glasses and detects targets/shots
+
+run media mtx
+mediamtx mediamtx.yml
+mediamtx mediamtx_player2.yml
+
+player 1: python finger_gun_detector.py -p 1
+player 2: python finger_gun_detector.py -p 2
+
+media mtx must run before running the python scripts
+
+
+4. Start the MentraOS app, run the laser tag app that corresponds to your backend, and go into the settings
+to set up your username, team, and port. Restart the app to let it hit the API with the new info.
+
+Flow: Glasses stream -> Mentra app -> your mentra backend app (registers you with scorekeeping API) -> rtmp stream on local ip -> media mtx -> computer vision python scripts -> ping scorekeeping API and play sounds for hits -> leaderboard at /webview/leaderboard pings API periodically for leaderboard data.
+
+
+Some username stuff is hardcoded for the hackathon, could be improved later.
+
+
+Original README:
+
 # MentraOS-Camera-Example-App
 
 This is a simple example app which demonstrates how to use the MentraOS Camera API to take photos and display them in a webview.
