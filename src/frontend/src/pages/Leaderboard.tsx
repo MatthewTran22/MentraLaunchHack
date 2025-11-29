@@ -68,9 +68,9 @@ function rtmpToHls(rtmpUrl: string, playerUsername?: string): string {
     // Assign port based on player username
     // Kevin = 8888, Phil = 8889
     let port = '8888'; // default
-    if (playerUsername?.toLowerCase() === 'phil') {
+    if (playerUsername?.toLowerCase() === 'kevin') {
       port = '8889';
-    } else if (playerUsername?.toLowerCase() === 'kevin') {
+    } else if (playerUsername?.toLowerCase() === 'phil') {
       port = '8888';
     }
     
@@ -326,6 +326,24 @@ export default function Leaderboard() {
       setLoading(false);
     }
   }, []);
+
+  const resetGame = useCallback(async () => {
+    try {
+      const response = await fetch('https://gobbler-working-bluebird.ngrok-free.app/api/reset', {
+        method: 'POST',
+        headers: new Headers({
+          "ngrok-skip-browser-warning": "true",
+        }),
+      });
+      if (!response.ok) {
+        throw new Error(`Failed to reset: ${response.statusText}`);
+      }
+      // Refresh leaderboard after reset
+      fetchLeaderboard();
+    } catch (err) {
+      console.error('Error resetting game:', err);
+    }
+  }, [fetchLeaderboard]);
 
   useEffect(() => {
     setMounted(true);
@@ -758,6 +776,18 @@ export default function Leaderboard() {
             <span className="text-green-500/60 tracking-wider uppercase font-medium">
               {teams[1]?.name}: {teams[1]?.score || 0}
             </span>
+            <span className="text-white/10">•</span>
+            <button
+              onClick={resetGame}
+              className="px-2 py-0.5 rounded text-[10px] tracking-wider uppercase font-bold transition-all hover:bg-red-500/20 hover:text-red-400"
+              style={{
+                background: 'rgba(239, 68, 68, 0.1)',
+                border: '1px solid rgba(239, 68, 68, 0.3)',
+                color: 'rgba(239, 68, 68, 0.7)',
+              }}
+            >
+              Reset
+            </button>
           </div>
         </div>
         </div>
