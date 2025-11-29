@@ -1,6 +1,16 @@
 import cv2
 import numpy as np
+import requests
 from ultralytics import YOLO
+
+# API endpoint for hit registration
+HITS_API_URL = "https://gobbler-working-bluebird.ngrok-free.app/api/hits"
+
+# Player config: player_id -> (username, target_team)
+PLAYER_CONFIG = {
+    1: ("Phil", "yellow"),
+    2: ("Kevin", "green"),
+}
 
 # High-vis color ranges in HSV (same as finger_gun_detector)
 HIGHVIS_YELLOW_LOWER = np.array([20, 100, 100])
@@ -19,8 +29,10 @@ USER_TEAM = "regular"
 
 
 class ShotAnalyzer:
-    def __init__(self):
+    def __init__(self, player_id=1):
         self.yolo = YOLO('yolov8n.pt')
+        self.player_id = player_id
+        self.username, self.target_team = PLAYER_CONFIG.get(player_id, ("unknown", "yellow"))
 
     def boxes_overlap(self, box1, box2, threshold=0.3):
         """Check if two bounding boxes overlap significantly."""
@@ -86,6 +98,24 @@ class ShotAnalyzer:
 
         return "highvis" if is_highvis else "regular"
 
+    def send_hit_to_api(self):
+        """Send hit data to the API endpoint."""
+        payload = {
+            "hitter_username": self.username,
+            "target_team": self.target_team
+        }
+        headers = {
+            "ngrok-skip-browser-warning": "true",
+            "Content-Type": "application/json"
+        }
+        try:
+            response = requests.post(HITS_API_URL, json=payload, headers=headers, timeout=5)
+            print(f"API Response: {response.status_code} - {response.text}")
+            return response.status_code == 200
+        except Exception as e:
+            print(f"API Error: {e}")
+            return False
+
     def is_valid_hit(self, image_path, hand_bbox=None):
         """
         Analyze a shot image to check if the crosshair hit an opponent.
@@ -134,6 +164,8 @@ class ShotAnalyzer:
                     # Valid hit only if target is on different team
                     if target_team != USER_TEAM:
                         print(f"HIT: True (hit {target_team.upper()} - opponent)")
+                        # Send hit to API
+                        self.send_hit_to_api()
                         return True
                     else:
                         print(f"HIT: False (friendly fire - same team: {target_team.upper()})")
@@ -143,9 +175,9 @@ class ShotAnalyzer:
         return False
 
 
-def analyze_shot(image_path, hand_bbox=None):
+def analyze_shot(image_path, hand_bbox=None, player_id=1):
     """Convenience function to analyze a single shot"""
-    analyzer = ShotAnalyzer()
+    analyzer = ShotAnalyzer(player_id=player_id)
     return analyzer.is_valid_hit(image_path, hand_bbox)
 
 
