@@ -1,5 +1,6 @@
 """FastAPI application for laser tag game backend."""
 import os
+import random
 from datetime import datetime
 
 from fastapi import FastAPI, HTTPException, status
@@ -59,7 +60,7 @@ app.add_middleware(
 )
 
 # Configuration: Wipe DB on startup (set via environment variable)
-WIPE_DB_ON_STARTUP = os.getenv("WIPE_DB_ON_STARTUP", "true").lower() == "true"
+WIPE_DB_ON_STARTUP = os.getenv("WIPE_DB_ON_STARTUP", "false").lower() == "true"
 
 
 @app.on_event("startup")
@@ -101,28 +102,19 @@ async def root():
     response_model=PlayerResponse,
     status_code=status.HTTP_201_CREATED,
     tags=["Players"],
-    summary="Create a new player",
-    description="Register a new player with a username and get their unique player ID",
+    summary="Create or reset a player",
+    description="Register a new player or reset an existing player's score and hits",
     responses={
         201: {
-            "description": "Player created successfully",
+            "description": "Player created or reset successfully",
             "content": {
                 "application/json": {
                     "example": {
                         "id": 1,
                         "username": "player1",
                         "score": 0,
-                        "team": "yellow"
-                    }
-                }
-            }
-        },
-        400: {
-            "description": "Username already exists",
-            "content": {
-                "application/json": {
-                    "example": {
-                        "detail": "Username 'player1' already exists"
+                        "team": "yellow",
+                        "stream_url": "rtmp://example.com/live/stream1"
                     }
                 }
             }
@@ -131,38 +123,76 @@ async def root():
 )
 async def create_player(player: PlayerCreate):
     """
-    Create a new player and return their ID.
+    Create a new player or reset an existing player.
     
-    This endpoint registers a new player in the game. Each player gets a unique ID
-    and starts with a score of 0.
+    This endpoint registers a new player in the game, or if the player already exists,
+    it resets their score to 0, updates their team, and clears all their hits.
     
-    - **username**: Must be unique and between 1-100 characters
+    - **username**: Must be between 1-100 characters
     - **team**: Must be either "yellow" or "green"
+    - **stream_url**: Optional RTMP stream URL for the player
     - Returns the player ID which is used for hit tracking
     
-    **Note**: Usernames must be unique. If a username already exists, a 400 error is returned.
+    **Note**: If a username already exists, the player's score is reset to 0 and all
+    their hits (both as hitter and target) are deleted. The player's team and stream_url
+    are updated to the new values provided.
     """
     db = get_db()
     players_table = db["players"]
+    hits_table = db["hits"]
     
     # Check if username already exists
     existing = players_table.find_one(username=player.username)
+    
     if existing:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Username '{player.username}' already exists"
+        # Player exists - reset their score and clear all hits
+        player_id = existing["id"]
+        
+        # Reset player score, update team and stream_url
+        players_table.update(
+            {
+                "id": player_id,
+                "score": 0,
+                "team": player.team,
+                "stream_url": player.stream_url,
+            },
+            ["id"]
         )
-    
-    # Create new player
-    player_data = {
-        "username": player.username,
-        "score": 0,
-        "team": player.team,
-        "stream_url": None,
-    }
-    player_id = players_table.insert(player_data)
-    
-    return PlayerResponse(id=player_id, username=player.username, score=0, team=player.team, stream_url=None)
+        
+        # Delete all hits where this player was the hitter
+        hits_by_player = list(hits_table.find(hitter_id=player_id))
+        for hit in hits_by_player:
+            hits_table.delete(id=hit["id"])
+        
+        # Delete all hits where this player was the target
+        hits_on_player = list(hits_table.find(target_id=player_id))
+        for hit in hits_on_player:
+            hits_table.delete(id=hit["id"])
+        
+        return PlayerResponse(
+            id=player_id,
+            username=player.username,
+            score=0,
+            team=player.team,
+            stream_url=player.stream_url
+        )
+    else:
+        # Create new player
+        player_data = {
+            "username": player.username,
+            "score": 0,
+            "team": player.team,
+            "stream_url": player.stream_url,
+        }
+        player_id = players_table.insert(player_data)
+        
+        return PlayerResponse(
+            id=player_id,
+            username=player.username,
+            score=0,
+            team=player.team,
+            stream_url=player.stream_url
+        )
 
 
 @app.post(
@@ -237,7 +267,7 @@ async def assign_stream(stream: StreamAssign):
     status_code=status.HTTP_201_CREATED,
     tags=["Hits"],
     summary="Record a hit",
-    description="Record a hit between two players and automatically update the hitter's score",
+    description="Record a hit on a target team and automatically update the hitter's score",
     responses={
         201: {
             "description": "Hit recorded successfully",
@@ -253,17 +283,17 @@ async def assign_stream(stream: StreamAssign):
             }
         },
         400: {
-            "description": "Invalid hit (e.g., self-hit)",
+            "description": "Invalid hit (e.g., hitting own team)",
             "content": {
                 "application/json": {
                     "example": {
-                        "detail": "Players cannot hit themselves"
+                        "detail": "Players cannot hit their own team"
                     }
                 }
             }
         },
         404: {
-            "description": "Player not found",
+            "description": "Player or team not found",
             "content": {
                 "application/json": {
                     "example": {
@@ -276,24 +306,25 @@ async def assign_stream(stream: StreamAssign):
 )
 async def record_hit(hit: HitCreate):
     """
-    Record a hit between two players.
+    Record a hit on a target team.
     
-    This endpoint records when one player hits another player. The hitter's score
-    is automatically incremented by 1 point.
+    This endpoint records when one player hits a team. A random player from the target
+    team is selected as the target, and the hitter's score is automatically incremented by 1 point.
     
     - **hitter_username**: The username of the player who made the hit
-    - **target_username**: The username of the player who was hit
+    - **target_team**: The team that was hit (yellow or green)
     
     **Rules**:
-    - Players cannot hit themselves (returns 400 error)
-    - Both players must exist in the database (returns 404 if not found)
+    - Players cannot hit their own team (returns 400 error)
+    - The hitter must exist in the database (returns 404 if not found)
+    - The target team must have at least one player (returns 404 if no players found)
     - Each hit increments the hitter's score by 1
     """
     db = get_db()
     players_table = db["players"]
     hits_table = db["hits"]
     
-    # Validate players exist by username
+    # Validate hitter exists by username
     hitter = players_table.find_one(username=hit.hitter_username)
     if not hitter:
         raise HTTPException(
@@ -301,21 +332,26 @@ async def record_hit(hit: HitCreate):
             detail=f"Hitter with username '{hit.hitter_username}' not found"
         )
     
-    target = players_table.find_one(username=hit.target_username)
-    if not target:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Target with username '{hit.target_username}' not found"
-        )
+    hitter_id = hitter["id"]
+    hitter_team = hitter.get("team", "yellow")
     
-    # Prevent self-hits
-    if hit.hitter_username == hit.target_username:
+    # Prevent hitting own team
+    if hitter_team.lower() == hit.target_team.lower():
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Players cannot hit themselves"
+            detail="Players cannot hit their own team"
         )
     
-    hitter_id = hitter["id"]
+    # Find all players on the target team
+    target_players = list(players_table.find(team=hit.target_team))
+    if not target_players:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"No players found on team '{hit.target_team}'"
+        )
+    
+    # Select a random player from the target team
+    target = random.choice(target_players)
     target_id = target["id"]
     
     # Record the hit
@@ -501,6 +537,70 @@ async def get_leaderboard():
     team_leaderboards.sort(key=lambda x: x.total_score, reverse=True)
     
     return LeaderboardResponse(teams=team_leaderboards)
+
+
+@app.post(
+    "/reset",
+    tags=["Admin"],
+    summary="Reset leaderboard",
+    description="Reset all player scores to 0 and delete all hits",
+    responses={
+        200: {
+            "description": "Leaderboard reset successfully",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "message": "Leaderboard reset successfully",
+                        "players_reset": 5,
+                        "hits_deleted": 42
+                    }
+                }
+            }
+        }
+    }
+)
+async def reset_leaderboard():
+    """
+    Reset the leaderboard by clearing all scores and hits.
+    
+    This endpoint:
+    - Sets all player scores to 0
+    - Deletes all hits from the database
+    - Preserves player information (username, team, stream_url)
+    
+    Use this to start a new game round while keeping all registered players.
+    """
+    db = get_db()
+    players_table = db["players"]
+    hits_table = db["hits"]
+    
+    # Get all players and reset their scores
+    all_players = list(players_table.all())
+    players_reset = 0
+    
+    for player in all_players:
+        players_table.update(
+            {
+                "id": player["id"],
+                "score": 0,
+            },
+            ["id"]
+        )
+        players_reset += 1
+    
+    # Delete all hits
+    all_hits = list(hits_table.all())
+    hits_deleted = 0
+    
+    for hit in all_hits:
+        hits_table.delete(id=hit["id"])
+        hits_deleted += 1
+    
+    return {
+        "message": "Leaderboard reset successfully",
+        "players_reset": players_reset,
+        "hits_deleted": hits_deleted,
+    }
 
 
 @app.get(

@@ -19,6 +19,11 @@ class PlayerCreate(BaseModel):
         description="Player team (yellow or green)",
         example="yellow"
     )
+    stream_url: str | None = Field(
+        default=None,
+        description="Optional RTMP stream URL for the player",
+        example="rtmp://example.com/live/stream1"
+    )
 
 
 class PlayerResponse(BaseModel):
@@ -45,13 +50,13 @@ class PlayerResponse(BaseModel):
 class HitCreate(BaseModel):
     """Request model for recording a hit."""
     hitter_username: str = Field(..., description="Username of the player who made the hit", example="player1")
-    target_username: str = Field(..., description="Username of the player who was hit", example="player2")
+    target_team: Literal["yellow", "green"] = Field(..., description="Team that was hit", example="green")
 
     class Config:
         json_schema_extra = {
             "example": {
                 "hitter_username": "player1",
-                "target_username": "player2"
+                "target_team": "green"
             }
         }
 

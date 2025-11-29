@@ -52,6 +52,9 @@ const MENTRAOS_API_KEY =
 
 const PORT = parseInt(process.env.PORT || "3000");
 
+const API_URL = process.env.API_URL // API base URL
+const NGROK_URL = API_URL
+
 
 // MAIN APP CLASS
 
@@ -141,40 +144,52 @@ class ExampleMentraOSApp extends AppServer {
     // Register this session for audio playback from the frontend
     registerSession(userId, session);
 
-    // const result = await session.audio.playAudio({
-    //   audioUrl: this.audioURL
-    // })
-    // // await session.audio.speak('Hello from your app!');
+    // get team from settings
+    const username = session.settings.get<string>("username");
+    const team = session.settings.get<string>("team");
+    const port = session.settings.get<number>("port");
+    const ip_address = "192.168.50.149"
 
-    // Set up transcription to log all speech-to-text
-    // setupTranscription(
-    //   session,
-    //   (finalText) => {
-    //     // Called when transcription is finalized
-    //     this.logger.info(`[FINAL] Transcription for user ${userId}: ${finalText}`);
-    //     console.log(`✅ Final transcription (user ${userId}): ${finalText}`);
+    const rtmp_url = `rtmp://${ip_address}:${port}/live/stream`;
 
-    //     // Broadcast final transcription to this user's SSE clients only
-    //     broadcastTranscriptionToClients(finalText, true, userId);
-    //   },
-    //   (partialText) => {
-    //     // Called for interim/partial results (optional)
-    //     console.log(`⏳ Partial transcription (user ${userId}): ${partialText}`);
+    console.log(`USER IS ON TEAM: ${team}`);
+    console.log(`USER NAME: ${username}`);
+    console.log(`RTMP URL: ${rtmp_url}`);
 
-    //     // Broadcast partial transcription to this user's SSE clients only
-    //     broadcastTranscriptionToClients(partialText, false, userId);
-    //   }
-    // );
+    // Register player with backend API
+    console.log(`Everything: ${username} ${team} ${rtmp_url}`);
+    if (username && team) {
+      try {
+        const apiEndpoint = `${API_URL}/api/players`;
+        console.log(`Registering player with API: ${apiEndpoint}`);
+        
+        const response = await fetch(apiEndpoint, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(NGROK_URL ? { 'ngrok-skip-browser-warning': 'true' } : {}),
+          },
+          body: JSON.stringify({
+            username: username,
+            team: team[0], // Ensure lowercase for API
+            stream_url: rtmp_url,
+          }),
+        });
 
-    // Register handler for all touch events
-    session.events.onTouchEvent((event) => {
-      console.log(`wTouch event: ${event.gesture_name}`);
-    });
-
-    // Listen for button presses on the glasses
-    setupButtonHandler(session, userId, this.logger, (s, u) =>
-      takePhoto(s, u, this.logger, this.photosMap)
-    );
+        if (response.ok) {
+          const playerData = await response.json();
+          console.log('Player registered successfully:', playerData);
+        } else {
+          const errorText = await response.text();
+          console.error(`Failed to register player: ${response.status} ${response.statusText}`, errorText);
+        }
+      } catch (error) {
+        console.error('Error registering player with API:', error);
+        // Don't throw - continue with session even if API call fails
+      }
+    } else {
+      console.warn('Cannot register player: username or team is missing');
+    }
 
     const cleanup = session.camera.onStreamStatus((status) => {
       console.log("RTMP status:", status.status);
@@ -187,7 +202,7 @@ class ExampleMentraOSApp extends AppServer {
     });
 
     await session.camera.startStream({
-      rtmpUrl: "rtmp://192.168.50.149:1935/live/stream",
+      rtmpUrl: rtmp_url,
     });
 
     // Note: urls are returned immediately, but viewers should connect only after
