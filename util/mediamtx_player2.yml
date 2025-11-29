@@ -1,5 +1,5 @@
-# MediaMTX configuration for RTMP streaming
-# Run with: mediamtx mediamtx.yml
+# MediaMTX configuration for RTMP streaming - Player 2
+# Run with: mediamtx mediamtx_player2.yml
 
 logLevel: info
 
@@ -10,18 +10,18 @@ writeQueueSize: 512
 
 # CORS - allow all origins
 api: yes
-apiAddress: :9997
+apiAddress: :9998
 apiAllowOrigin: '*'
 
-# RTMP server on port 1935 (Player 1)
+# RTMP server on port 1937 (Player 2)
 rtmp: yes
-rtmpAddress: :1935
+rtmpAddress: :1937
 
 # Disable other protocols
 rtsp: no
 webrtc: no
 hls: yes
-hlsAddress: :8888
+hlsAddress: :8889
 hlsAllowOrigin: '*'
 srt: no
 

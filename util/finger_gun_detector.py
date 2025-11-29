@@ -42,7 +42,8 @@ def get_local_ip():
         return "127.0.0.1"
 
 class FingerGunDetector:
-    def __init__(self):
+    def __init__(self, player_id=1):
+        self.player_id = player_id
         self.mp_hands = mp.solutions.hands
         self.hands = self.mp_hands.Hands(
             static_image_mode=False,
@@ -601,7 +602,7 @@ class FingerGunDetector:
                     hand_bbox = self.get_hand_bbox(hand_landmarks, frame.shape)
                     # Save the shot image and analyze it
                     filepath, hand_bbox = self.save_shot(frame, hand_bbox)
-                    is_valid_hit = analyze_shot(filepath, hand_bbox)
+                    is_valid_hit = analyze_shot(filepath, hand_bbox, self.player_id)
                     # Handle hit and play sound
                     self.on_hit(is_valid_hit)
                     # Draw shot effect
@@ -636,8 +637,18 @@ class FingerGunDetector:
             print("Shots directory cleared.")
 
 def main():
+    import argparse
+
+    parser = argparse.ArgumentParser(description='Finger Gun Game')
+    parser.add_argument('--player', '-p', type=int, default=1, choices=[1, 2],
+                        help='Player number (1 or 2)')
+    args = parser.parse_args()
+
+    player_id = args.player
+    rtmp_port = 1935 if player_id == 1 else 1937
+
     print("=" * 50)
-    print("FINGER GUN GAME")
+    print(f"FINGER GUN GAME - PLAYER {player_id}")
     print("=" * 50)
     print("\nHold your hand in a finger gun gesture")
     print("Pull your thumb back to cock, release forward to shoot")
@@ -646,19 +657,19 @@ def main():
     print("=" * 50)
 
     # Initialize detector
-    detector = FingerGunDetector()
+    detector = FingerGunDetector(player_id=player_id)
 
     # Get local IP and set up RTMP
     local_ip = get_local_ip()
-    rtmp_port = 1935
     rtmp_url = f"rtmp://{local_ip}:{rtmp_port}/live/stream"
-    
+
+    config_file = "mediamtx.yml" if player_id == 1 else "mediamtx_player2.yml"
     print(f"\n" + "=" * 50)
-    print(f"RTMP SERVER")
+    print(f"RTMP SERVER - PLAYER {player_id}")
     print(f"=" * 50)
     print(f"Stream to: {rtmp_url}")
     print(f"=" * 50)
-    print("\n*** Run MediaMTX first: mediamtx mediamtx.yml ***")
+    print(f"\n*** Run MediaMTX first: mediamtx {config_file} ***")
     print("\nWaiting for RTMP stream...")
     print("(Configure your camera now - will keep trying until connected)")
     
@@ -711,7 +722,7 @@ def main():
                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
 
         # Display frame
-        cv2.imshow('Finger Gun Game', processed_frame)
+        cv2.imshow(f'Finger Gun Game - Player {player_id}', processed_frame)
 
         # Check for quit
         if cv2.waitKey(1) & 0xFF == ord('q'):
