@@ -6,7 +6,7 @@ logLevel: info
 # Timeouts - increase to prevent disconnects
 readTimeout: 60s
 writeTimeout: 60s
-writeQueueSize: 512
+writeQueueSize: 8
 
 # CORS - allow all origins
 api: yes

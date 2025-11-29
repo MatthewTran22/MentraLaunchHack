@@ -65,8 +65,8 @@ class FingerGunDetector:
         self.prev_thumb_y = {}  # Store previous thumb Y position for each hand
         self.is_cocked = {}  # Track if gun is cocked for each hand
         self.cock_threshold = 0.02  # Minimum movement to register as cocking
-        self.shoot_cooldown = {}  # Prevent rapid fire
-        self.cooldown_frames = 10
+        self.last_shot_time = 0  # Time of last shot
+        self.shot_cooldown = 1.0  # 1 second cooldown between shots
 
         # Team counts
         self.yellow_count = 0
@@ -235,17 +235,17 @@ class FingerGunDetector:
         # For POV, track thumb movement in both Y (up/down) and Z (forward/back)
         current_thumb_y = thumb_tip.y
         current_thumb_z = thumb_tip.z
+        current_time = time.time()
 
         # Initialize tracking for this hand if not exists
         if hand_id not in self.prev_thumb_y:
             self.prev_thumb_y[hand_id] = current_thumb_y
             self.is_cocked[hand_id] = False
-            self.shoot_cooldown[hand_id] = 0
             return False
 
-        # Decrease cooldown
-        if self.shoot_cooldown[hand_id] > 0:
-            self.shoot_cooldown[hand_id] -= 1
+        # Check if still on cooldown
+        time_since_last_shot = current_time - self.last_shot_time
+        on_cooldown = time_since_last_shot < self.shot_cooldown
 
         # Calculate thumb movement (negative Y = moving up, positive Y = moving down)
         # For POV cocking: thumb pulls back (higher Y or similar) then snaps forward (lower Y)
@@ -260,9 +260,9 @@ class FingerGunDetector:
 
         # Detect shooting motion (thumb snaps forward/down after being cocked)
         elif thumb_movement > self.cock_threshold and self.is_cocked[hand_id]:
-            if self.shoot_cooldown[hand_id] == 0:
+            if not on_cooldown:
                 shot_fired = True
-                self.shoot_cooldown[hand_id] = self.cooldown_frames
+                self.last_shot_time = current_time
             self.is_cocked[hand_id] = False
 
         # Update previous position
@@ -729,13 +729,51 @@ def main():
     
     print("\nProcessing frames...")
 
+    consecutive_failures = 0
+    max_failures = 30  # Reconnect after this many failed frames
+
     while True:
         ret, frame = cap.read()
 
         if not ret or frame is None:
-            print("Warning: Failed to read frame, retrying...")
-            time.sleep(0.1)
+            consecutive_failures += 1
+
+            if consecutive_failures >= max_failures:
+                print("\nStream disconnected. Attempting to reconnect...")
+                cap.release()
+
+                # Reconnect loop
+                cap = None
+                while cap is None:
+                    cap = cv2.VideoCapture(rtmp_url, cv2.CAP_FFMPEG)
+
+                    if cap.isOpened():
+                        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                        ret, test_frame = cap.read()
+                        if ret and test_frame is not None:
+                            print("✓ Reconnected!")
+                            consecutive_failures = 0
+                            break
+                        else:
+                            cap.release()
+                            cap = None
+
+                    print(".", end="", flush=True)
+                    time.sleep(2)
+
+                    # Check for quit during reconnect
+                    if cv2.waitKey(1) & 0xFF == ord('q'):
+                        cap = None
+                        break
+
+                if cap is None:
+                    break
+
+            time.sleep(0.01)
             continue
+
+        # Reset failure counter on successful frame
+        consecutive_failures = 0
 
         # Process frame
         processed_frame, shot_fired = detector.process_frame(frame)
@@ -759,7 +797,8 @@ def main():
             break
 
     # Cleanup
-    cap.release()
+    if cap is not None:
+        cap.release()
     cv2.destroyAllWindows()
     detector.release()
     print("\nGame ended. Thanks for playing!")
